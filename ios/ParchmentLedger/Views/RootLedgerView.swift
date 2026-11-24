@@ -1,3 +1,9 @@
+// MARK: - Root Ledger Shell
+//
+// Top-level 5-pillar horizontal paged container (`Workouts`, `Macros`, `Recipes`, optional `Cycle`,
+// and `Vault`) anchored by a shared greeting/date header, folio indicator footer, and global
+// root-level sheets (`RoutineManagerSheet`, `WeightLogSheet`, `CustomExerciseSheet`).
+
 import SwiftUI
 
 struct RootLedgerView: View {
@@ -65,30 +71,14 @@ struct RootLedgerView: View {
 
                 folioStatusFooter
             }
-
-            // Floating Toast Pill
-            if let toast = store.toastMessage {
-                VStack {
-                    Spacer()
-                    Text(toast.uppercased())
-                        .font(LedgerFont.sansSm(semibold: true))
-                        .tracking(1.3)
-                        .foregroundStyle(LedgerColor.parchmentLight)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(LedgerColor.inkPrimary)
-                        .clipShape(Capsule())
-                        .shadow(color: LedgerColor.inkPrimary.opacity(0.24), radius: 10, x: 0, y: 4)
-                        .padding(.bottom, 42)
-                }
-                .frame(maxWidth: .infinity)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .allowsHitTesting(false)
-                .zIndex(60)
-            }
         }
+        .ledgerToastOverlay(
+            (store.showRoutineManager || store.showWeightLog || store.showCustomExerciseStudio) ? nil : store.toastMessage,
+            bottomPadding: 42
+        )
         .onChange(of: store.activePillar) { _, _ in
             store.openDropdown = nil
+            dismissLedgerKeyboard()
             LedgerHaptics.light()
             store.triggerInkWrite()
         }
@@ -142,6 +132,7 @@ struct RootLedgerView: View {
 
             HStack(alignment: .center, spacing: 8) {
                 Button {
+                    dismissLedgerKeyboard()
                     store.jumpToToday()
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
@@ -151,6 +142,7 @@ struct RootLedgerView: View {
                     .font(LedgerFont.sansSm())
                     .tracking(2.0)
                     .foregroundStyle(LedgerColor.inkPrimary)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Jump to today")

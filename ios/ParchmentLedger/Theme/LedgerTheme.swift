@@ -1,5 +1,21 @@
+// MARK: - Parchment Ledger Design System
+//
+// Defines the visual language for Velda Fitness:
+// - Warm parchment surface palette (`LedgerColor`) with high-contrast ink tokens.
+// - Strict 3-size typography scale (`LedgerFont`: 20pt lg, 15pt md, 11pt sm) across serif & sans.
+// - Tactile button styles (`WarmActionButtonStyle`, `PrimaryActionButtonStyle`, `VerifiedActionButtonStyle`).
+// - Ink-write reveal animation (`InkWriteModifier`), floating toast overlay (`LedgerToastOverlayModifier`),
+//   reusable confirmation/AI-gating alerts, and 3-tier haptic feedback (`LedgerHaptics`).
+
 import SwiftUI
 import UIKit
+
+/// Resigns the active first responder so transient software keyboards and macOS iOS-app
+/// input accessory bars dismiss cleanly across tab switches, saves, and sheet dismissals.
+@MainActor
+func dismissLedgerKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
 
 enum LedgerColor {
     static let parchmentBase = Color(red: 0.847, green: 0.784, blue: 0.682)      // #D8C8AE
@@ -524,10 +540,13 @@ extension View {
         modifier(InkWriteModifier(index: index, epoch: epoch))
     }
 
+    /// Shared secondary pill chrome for SwiftUI containers (`PhotosPicker`, `Menu`) that cannot
+    /// directly adopt a `ButtonStyle`. Enforces uppercase text to match `WarmActionButtonStyle`.
     func uniformSecondaryButtonChrome(disabled: Bool = false, fullWidth: Bool = true) -> some View {
         self
             .font(LedgerFont.sansSm(semibold: true))
             .tracking(0.8)
+            .textCase(.uppercase)
             .lineLimit(1)
             .minimumScaleFactor(0.76)
             .foregroundStyle(LedgerColor.inkPrimary)
@@ -543,6 +562,12 @@ extension View {
                     .strokeBorder(LedgerColor.inkPrimary.opacity(0.28), lineWidth: 1.0)
             )
             .opacity(disabled ? 0.42 : 1.0)
+    }
+
+    /// Renders `LedgerStore.toastMessage` inside the current view hierarchy (including modal `.sheet`
+    /// presentations, where a root-level overlay would otherwise sit occluded behind the sheet).
+    func ledgerToastOverlay(_ message: String?, bottomPadding: CGFloat = 24) -> some View {
+        modifier(LedgerToastOverlayModifier(message: message, bottomPadding: bottomPadding))
     }
 
     func actionConfirmationAlert(_ pending: Binding<PendingActionConfirmation?>) -> some View {
@@ -585,6 +610,32 @@ extension View {
             }
         } message: { name in
             Text("\(name) requires connecting your own AI provider (a ChatGPT subscription sign-in or an API key for OpenAI, Gemini, or Anthropic) in Vault. Core workout, nutrition, recipe, and cycle tracking work fully offline without AI.")
+        }
+    }
+}
+
+struct LedgerToastOverlayModifier: ViewModifier {
+    let message: String?
+    let bottomPadding: CGFloat
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .bottom) {
+            if let toast = message {
+                Text(toast.uppercased())
+                    .font(LedgerFont.sansSm(semibold: true))
+                    .tracking(1.3)
+                    .foregroundStyle(LedgerColor.parchmentLight)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(LedgerColor.inkPrimary)
+                    .clipShape(Capsule())
+                    .shadow(color: LedgerColor.inkPrimary.opacity(0.24), radius: 10, x: 0, y: 4)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, bottomPadding)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .allowsHitTesting(false)
+            }
         }
     }
 }

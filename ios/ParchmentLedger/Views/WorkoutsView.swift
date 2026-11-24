@@ -1,3 +1,9 @@
+// MARK: - Workouts Pillar View
+//
+// Daily training ledger showing the weekly date strip, collapsible monthly calendar, scheduled
+// routine header, inline exercise/routine pickers, MoveKit looping video demos, per-set logging
+// (`weighted`, `bodyweight`, `timed`), and linear progression trendline charts.
+
 import AVFoundation
 import SwiftUI
 
@@ -330,7 +336,15 @@ struct WorkoutsView: View {
 
                     Button("Remove") {
                         if wk.scheduleSource == .dateOverride {
-                            store.removeRoutineFromSelectedDateOnly()
+                            LedgerHaptics.heavy()
+                            pendingConfirm = PendingActionConfirmation(
+                                title: "Remove Routine for \(wk.displayDateShort)?",
+                                message: "Remove \"\(wk.title)\" from \(wk.displayDateShort)? Any logged sets for this date stay saved.",
+                                confirmLabel: "Remove",
+                                isDestructive: true
+                            ) {
+                                store.removeRoutineFromSelectedDateOnly()
+                            }
                         } else {
                             LedgerHaptics.heavy()
                             removeDialogPresented = true
@@ -587,6 +601,9 @@ struct WorkoutsView: View {
     private func compactVolumeSuffix(_ ex: RoutineExerciseItem) -> String {
         let p = ex.progression
         guard p.latestVolume > 0 else { return "" }
+        if p.metricUnit == "sec" {
+            return " · \(Int(p.latestVolume.rounded())) SEC"
+        }
         if p.metricUnit == "reps" {
             return " · \(Int(p.latestVolume.rounded())) REPS"
         }
@@ -829,12 +846,16 @@ struct VolumeTrendlineChartView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if progression.sessions.count < 2 {
-                Text("Log at least 2 sessions to plot total volume trendline (\(Int(progression.latestVolume)) logged so far).")
+                let metricName = progression.metricUnit == "sec" ? "time" : (progression.metricUnit == "reps" ? "reps" : "total volume")
+                let baselineValue = progression.metricUnit == "sec"
+                    ? "\(Int(progression.latestVolume)) sec"
+                    : (progression.metricUnit == "reps" ? "\(Int(progression.latestVolume)) reps" : "\(Int(progression.latestVolume))")
+                Text("Log at least 2 sessions to plot \(metricName) trendline (\(baselineValue) logged so far).")
                     .font(LedgerFont.sansSm())
                     .foregroundStyle(LedgerColor.inkSecondary)
             } else {
                 let sessions = progression.sessions
-                let unitLabel = progression.metricUnit == "reps" ? "reps" : "\(unit) vol"
+                let unitLabel = progression.metricUnit == "sec" ? "sec" : (progression.metricUnit == "reps" ? "reps" : "\(unit) vol")
 
                 HStack {
                     Text(unitLabel.uppercased())

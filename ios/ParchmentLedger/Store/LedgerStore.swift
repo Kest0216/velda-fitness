@@ -1,3 +1,10 @@
+// MARK: - Unidirectional Application Store
+//
+// Single `@MainActor` `ObservableObject` coordinating all 5 pillars (`Workouts`, `Macros`, `Recipes`,
+// `Cycle`, `Vault`). All personal data mutations persist synchronously via `DatabaseManager` and
+// credentials live in `KeychainStore`; optional BYO-AI requests (`AIProviderService`) and iCloud
+// sync (`CloudSyncService`) run asynchronously without any Velda-hosted backend.
+
 import Foundation
 import SwiftUI
 

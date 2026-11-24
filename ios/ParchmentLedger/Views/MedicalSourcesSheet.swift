@@ -1,3 +1,8 @@
+// MARK: - Health & Dietary Sources Sheet
+//
+// Displays the non-medical disclaimer alongside clickable links to public U.S. government
+// (`FDA.gov`, `DietaryGuidelines.gov`, `WomensHealth.gov`, `NICHD.NIH.gov`) and PubMed references.
+
 import SwiftUI
 
 struct MedicalSourcesSheet: View {

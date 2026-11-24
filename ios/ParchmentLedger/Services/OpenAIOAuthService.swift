@@ -1,3 +1,8 @@
+// MARK: - ChatGPT OAuth PKCE Sign-In
+//
+// Implements OAuth 2.0 + PKCE against OpenAI's auth endpoints via `ASWebAuthenticationSession`
+// using the `veldafitness://oauth/openai` callback scheme, persisting tokens in `KeychainStore`.
+
 import AuthenticationServices
 import CryptoKit
 import Foundation

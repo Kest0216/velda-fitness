@@ -1,3 +1,8 @@
+// MARK: - Nutrition Over Time Sheet
+//
+// Interactive multi-day line chart sheet covering all 7 tracked nutrients (Calories, Protein,
+// Carbs, Fat, Sodium, Sugar, Cholesterol) across 7D/14D/30D/90D windows with target/limit guides.
+
 import SwiftUI
 
 struct MacroTrendsSheet: View {

@@ -1,3 +1,10 @@
+// MARK: - On-Device SQLite Persistence Engine
+//
+// Zero-server SQLite (`WAL` mode + foreign keys) serialized on a dedicated `DispatchQueue`.
+// Handles one-time folder migration from legacy `ParchmentLedger` -> `VeldaFitness`, seeds the
+// 588-item MoveKit exercise manifest, enforces 60-day TTL cleanup on unsaved recipe cache, and
+// computes workout progression and cycle regularity summaries locally.
+
 import Foundation
 import SQLite3
 import UIKit
@@ -721,7 +728,7 @@ final class DatabaseManager: @unchecked Sendable {
                     if doneHere > 0 { completedExercises += 1 }
 
                     let (sugReps, sugWeight) = lastCompletedSetSuggestion(exerciseId: exId)
-                    let prog = computeProgressionInternal(exerciseId: exId)
+                    let prog = computeProgressionInternal(exerciseId: exId, trackingType: trackingType)
 
                     exItems.append(
                         RoutineExerciseItem(
@@ -816,7 +823,11 @@ final class DatabaseManager: @unchecked Sendable {
         return (8, 0)
     }
 
-    private func computeProgressionInternal(exerciseId: String) -> ProgressionSummary {
+    /// Aggregates up to the last 8 completed workout sessions for an exercise and computes a linear
+    /// regression slope to determine progression status (`yes`, `no`, `flat`, `baseline`).
+    /// Note: `workout_sets.reps` stores duration in seconds when `trackingType == "timed"`, so
+    /// `metricUnit` is `"sec"` for timed movements, `"reps"` for zero-weight bodyweight work, and `"vol"` otherwise.
+    private func computeProgressionInternal(exerciseId: String, trackingType: String = "weighted") -> ProgressionSummary {
         guard let db = db else { return .empty }
         var rawRows: [(date: String, totalVol: Double, totalReps: Int, maxW: Double, count: Int)] = []
         var stmt: OpaquePointer?
@@ -848,8 +859,9 @@ final class DatabaseManager: @unchecked Sendable {
         let ordered = Array(rawRows.reversed())
         guard !ordered.isEmpty else { return .empty }
 
-        let useRepsOnly = ordered.allSatisfy { $0.totalVol == 0.0 }
-        let metricUnit = useRepsOnly ? "reps" : "vol"
+        let isTimed = trackingType == "timed"
+        let useRepsOnly = isTimed || ordered.allSatisfy { $0.totalVol == 0.0 }
+        let metricUnit = isTimed ? "sec" : (useRepsOnly ? "reps" : "vol")
 
         var sessions: [SessionVolumePoint] = []
         var ys: [Double] = []

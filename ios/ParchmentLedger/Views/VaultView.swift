@@ -1,3 +1,9 @@
+// MARK: - Vault & Settings Pillar View
+//
+// Central privacy and configuration hub: on-device storage meters, 60-day unsaved recipe cache
+// sweeping, weight unit & Cycle tab toggles, BYO-AI provider credentials (Keychain-backed),
+// iCloud Drive/CloudKit backups, JSON/Markdown/Text export & import, legal links, and 2-step erase.
+
 import SwiftUI
 
 struct VaultView: View {
@@ -646,14 +652,16 @@ struct VaultView: View {
     private func storageBar(label: String, valueText: String, ratio: Double, minRatio: Double) -> some View {
         let clamped = min(1.0, max(minRatio, ratio))
         return VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(label.uppercased())
                     .tracking(0.8)
-                    .lineLimit(1)
-                Spacer()
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
                 Text(valueText)
                     .monospacedDigit()
                     .font(LedgerFont.sansSm(semibold: true))
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .font(LedgerFont.sansSm())
             .foregroundStyle(LedgerColor.inkPrimary)

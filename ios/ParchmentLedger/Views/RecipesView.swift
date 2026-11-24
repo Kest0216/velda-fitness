@@ -1,3 +1,9 @@
+// MARK: - Recipes Pillar View
+//
+// Dual-tab recipe book (`Saved` and 60-day auto-expiring `Discover`) with floating meal/dietary
+// filter popovers, expandable recipe cards, Camera/Photo Library/BYO-AI dish image controls,
+// one-tap macro logging, and multi-format sharing.
+
 import PhotosUI
 import SwiftUI
 import UIKit

@@ -1,3 +1,8 @@
+// MARK: - UIKit Share Sheet Bridge
+//
+// Thin `UIViewControllerRepresentable` wrapper around `UIActivityViewController` for exporting
+// generated `.json`, `.md`, and `.txt` files from Recipes, Routine Manager, and Vault.
+
 import SwiftUI
 import UIKit
 
