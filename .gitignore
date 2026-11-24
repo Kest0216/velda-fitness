@@ -1,0 +1,15 @@
+prototype/data/
+prototype/.env*
+.env*
+ios/ParchmentLedger/MoveKitVideos/*.mp4
+full-library-fixes-*/
+ios/DerivedData/
+*.xcuserdata/
+*.local.xcconfig
+*.local.plist
+__pycache__/
+*.pyc
+.DS_Store
+ios/ParchmentLedger/local_secrets.json
+LAUNCH_CHECKLIST.md
+.wrangler/

@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "velda-fitness",
+  "compatibility_date": "2026-11-24",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./website",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    { "pattern": "veldaapp.com", "custom_domain": true },
+    { "pattern": "www.veldaapp.com", "custom_domain": true }
+  ]
+}

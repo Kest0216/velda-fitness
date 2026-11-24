@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Parchment &amp; Ink — Personal Workout &amp; Recipe Ledger</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,400;1,600&family=Montserrat:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+  <!-- Warm Blurred Parchment Desk Backdrop & SVG Noise Filter Definitions -->
+  <div class="desk-environment" aria-hidden="true">
+    <svg width="0" height="0" style="position:absolute;">
+      <defs>
+        <filter id="parchment-grain" x="0%" y="0%" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.82" numOctaves="4" seed="14" stitchTiles="stitch" result="noise" />
+          <feColorMatrix type="matrix" values="
+            0.35 0 0 0 0.28
+            0 0.30 0 0 0.22
+            0 0 0.24 0 0.16
+            0 0 0 0.55 0" in="noise" result="coloredNoise" />
+        </filter>
+        <filter id="desk-grain" x="0%" y="0%" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.45" numOctaves="3" seed="7" stitchTiles="stitch" />
+          <feColorMatrix type="saturate" values="0.2" />
+        </filter>
+      </defs>
+    </svg>
+    <div class="desk-noise" style="filter: url(#desk-grain);"></div>
+  </div>
+
+  <!-- Centered Smartphone Mockup -->
+  <main class="phone-stage">
+    <div class="phone-chassis">
+      <div class="hw-btn hw-mute"></div>
+      <div class="hw-btn hw-vol-up"></div>
+      <div class="hw-btn hw-vol-down"></div>
+      <div class="hw-btn hw-power"></div>
+
+      <!-- Inner App Screen -->
+      <div class="phone-screen" id="phoneScreen">
+        <div class="parchment-texture" style="filter: url(#parchment-grain);"></div>
+        <div class="parchment-speckles"></div>
+        <div class="screen-glass-sheen"></div>
+
+        <!-- Top Speaker & Camera Notch -->
+        <div class="phone-notch" aria-hidden="true">
+          <div class="notch-speaker"></div>
+          <div class="notch-camera"></div>
+        </div>
+
+        <!-- PERSISTENT TOP HEADER (Clean, no corner vines) -->
+        <header class="app-header">
+          <div id="greetingText" class="tracked-caps t-sm text-[#191715] select-none">
+            GOOD MORNING
+          </div>
+
+          <!-- Ultra-thin 1px horizontal ink progress line (Today's Workout Completion) -->
+          <div class="progress-line-wrapper">
+            <div class="progress-track" aria-label="Today's workout completion">
+              <div class="progress-fill" id="dailyProgressFill" style="width: 0%;">
+                <span class="progress-nib-dot"></span>
+              </div>
+            </div>
+            <span id="dailyProgressPct" class="t-sm font-medium tracking-[0.06em] text-[#191715] tabular-nums">
+              0%
+            </span>
+          </div>
+
+          <div class="flex items-start justify-between">
+            <div class="tracked-caps t-sm leading-[1.6] text-[#191715] select-none">
+              <div id="dateDayLine">THURSDAY</div>
+              <div id="dateFullLine">19 NOV 2026</div>
+            </div>
+
+            <button
+              id="btnRefreshLedger"
+              type="button"
+              class="btn-refresh-ledger warm-icon-btn"
+              title="Refresh ledger"
+              aria-label="Refresh ledger"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"
+                  stroke="#191715"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"
+                  stroke="#191715"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <!-- RIGHT-HANDED ERGONOMIC VERTICAL NAVIGATION BAR (Pressable & Swipeable) -->
+        <nav class="right-nav-stage" aria-label="Primary navigation">
+          <div id="rightNavLineup" class="right-nav-lineup show-hints">
+            <!-- 1. Workouts -->
+            <button
+              type="button"
+              class="nav-item-btn active"
+              data-view="workouts"
+              aria-label="Workouts"
+            >
+              <span class="nav-peek-label t-sm">Workouts</span>
+              <span class="nav-icon-wrap">
+                <svg width="22" height="22" viewBox="0 0 26 26" fill="none">
+                  <path d="M9.5 9.5 V7.2 C9.5 5.3 11 3.8 13 3.8 C15 3.8 16.5 5.3 16.5 7.2 V9.5" stroke="#191715" stroke-width="1.5" stroke-linecap="round"/>
+                  <path d="M7.2 11.2 C5.6 13.1 5.4 16.2 6.8 18.6 C8.1 20.8 10.4 21.8 13 21.8 C15.6 21.8 17.9 20.8 19.2 18.6 C20.6 16.2 20.4 13.1 18.8 11.2 C17.6 9.8 15.6 9.3 13 9.3 C10.4 9.3 8.4 9.8 7.2 11.2 Z" stroke="#191715" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M10.5 15.5 H15.5" stroke="#191715" stroke-width="1.35" stroke-linecap="round"/>
+                </svg>
+              </span>
+            </button>
+
+            <!-- 2. Recipes -->
+            <button
+              type="button"
+              class="nav-item-btn"
+              data-view="recipes"
+              aria-label="Recipes"
+            >
+              <span class="nav-peek-label t-sm">Recipes</span>
+              <span class="nav-icon-wrap">
+                <svg width="22" height="22" viewBox="0 0 26 26" fill="none">
+                  <circle cx="13" cy="6.2" r="1.4" stroke="#191715" stroke-width="1.45"/>
+                  <path d="M5.2 17.5 C5.2 12.4 8.7 8.4 13 8.4 C17.3 8.4 20.8 12.4 20.8 17.5" stroke="#191715" stroke-width="1.5" stroke-linecap="round"/>
+                  <path d="M3.5 17.8 H22.5" stroke="#191715" stroke-width="1.5" stroke-linecap="round"/>
+                  <path d="M11.2 14.6 C12.2 12.6 14.3 12.1 15.5 12.5 C15.2 14.1 13.8 15.4 11.2 14.6 Z" stroke="#191715" stroke-width="1.25" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </button>
+
+            <!-- 3. Vault -->
+            <button
+              type="button"
+              class="nav-item-btn"
+              data-view="vault"
+              aria-label="Vault and Storage"
+            >
+              <span class="nav-peek-label t-sm">Vault</span>
+              <span class="nav-icon-wrap">
+                <svg width="22" height="22" viewBox="0 0 26 26" fill="none">
+                  <ellipse cx="13" cy="7.5" rx="7.5" ry="2.6" stroke="#191715" stroke-width="1.45"/>
+                  <path d="M5.5 7.5 V18.5 C5.5 19.9 8.85 21.1 13 21.1 C17.15 21.1 20.5 19.9 20.5 18.5 V7.5" stroke="#191715" stroke-width="1.45"/>
+                  <path d="M5.5 13 C5.5 14.4 8.85 15.6 13 15.6 C17.15 15.6 20.5 14.4 20.5 13" stroke="#191715" stroke-width="1.25"/>
+                </svg>
+              </span>
+            </button>
+
+            <!-- Tuck/Fold handle right inside navbar (press or swipe right to fold) -->
+            <button
+              id="navFoldHandle"
+              type="button"
+              class="nav-item-btn nav-fold-handle"
+              title="Fold navigation bar"
+              aria-label="Fold navigation bar"
+            >
+              <span class="nav-icon-wrap">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M6 3.5 L10.5 8 L6 12.5" stroke="#191715" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </button>
+          </div>
+        </nav>
+
+        <!-- Slim Right-Edge Tab (Press or swipe left from right edge to unfold) -->
+        <button
+          id="foldedEdgeTab"
+          type="button"
+          class="folded-edge-tab"
+          title="Unfold navigation bar"
+          aria-label="Unfold navigation bar"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+            <path d="M10.5 3.5 L6 8 L10.5 12.5" stroke="#191715" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+
+        <!-- MAIN DYNAMIC PARCHMENT CONTENT VIEWPORT -->
+        <section id="appContentViewport" class="app-content-viewport nav-open" aria-live="polite">
+          <!-- Rendered dynamically via app.js -->
+        </section>
+
+        <!-- Subtle Toast Feedback -->
+        <div id="inkToast" class="ink-toast t-sm" role="status"></div>
+
+        <!-- Hidden file input for Cooked Recipe Photo Override -->
+        <input id="recipePhotoFileInput" type="file" accept="image/*" capture="environment" class="hidden" />
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
