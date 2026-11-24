@@ -1,3 +1,9 @@
+// MARK: - Routine Manager Sheet
+//
+// Unified sheet for browsing saved workout routines, toggling weekly day assignments,
+// manually building/editing routines from the 588 MoveKit + custom catalogs, importing/sharing
+// routines as JSON/Markdown/Text, and optionally generating routines via the user's BYO-AI provider.
+
 import SwiftUI
 
 struct RoutineManagerSheet: View {
@@ -64,6 +70,7 @@ struct RoutineManagerSheet: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
         }
+        .ledgerToastOverlay(store.toastMessage)
         .onAppear {
             searchResults = DatabaseManager.shared.fuzzySearchExercises(query: "", limit: 30)
             sheetEpoch &+= 1
@@ -147,6 +154,7 @@ struct RoutineManagerSheet: View {
                 .buttonStyle(WarmActionButtonStyle())
 
                 Button("Save") {
+                    dismissLedgerKeyboard()
                     let cleanName = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                     let displayTitle = cleanName.isEmpty ? "Untitled Routine" : cleanName
                     let verb = editingRoutineId != nil ? "Update" : "Create"
@@ -162,6 +170,7 @@ struct RoutineManagerSheet: View {
                 .buttonStyle(PrimaryActionButtonStyle())
             } else {
                 Button("Done") {
+                    dismissLedgerKeyboard()
                     LedgerHaptics.light()
                     dismiss()
                 }

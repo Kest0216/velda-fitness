@@ -1,3 +1,9 @@
+// MARK: - Manual Recipe Creation Sheet
+//
+// Full-form local recipe builder for creating saved recipes offline (title, meal slot, prep time,
+// servings, per-serving macros & FDA limits, dietary tags, allergens, ingredients, steps, and
+// optional Camera/Photo Library dish photo).
+
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -45,6 +51,7 @@ struct ManualRecipeSheet: View {
                     Spacer()
 
                     Button("Cancel") {
+                        dismissLedgerKeyboard()
                         LedgerHaptics.light()
                         dismiss()
                     }
@@ -76,6 +83,7 @@ struct ManualRecipeSheet: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
         }
+        .ledgerToastOverlay(store.toastMessage)
         .onChange(of: photoPickerItem) { _, newItem in
             guard let newItem else { return }
             Task {
@@ -111,7 +119,8 @@ struct ManualRecipeSheet: View {
                 .foregroundStyle(LedgerColor.inkPrimary)
                 .warmRecessedField()
 
-            HStack(spacing: 6) {
+            // 2x2 grid prevents "BREAKFAST" from truncating on narrow 288pt viewports.
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
                 ForEach(mealTypes, id: \.self) { m in
                     Button(m) {
                         LedgerHaptics.light()
@@ -302,6 +311,7 @@ struct ManualRecipeSheet: View {
     }
 
     private func requestCreateConfirmation() {
+        dismissLedgerKeyboard()
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else {
             store.showToast("Enter a recipe title")

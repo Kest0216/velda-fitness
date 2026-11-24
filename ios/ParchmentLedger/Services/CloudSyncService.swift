@@ -1,3 +1,9 @@
+// MARK: - Private Apple iCloud Backup & Sync
+//
+// Optional zero-developer-server sync to the user's own CloudKit private zone (`VeldaPrivateZone`)
+// and local/iCloud Drive JSON snapshots. Live CloudKit calls are gated behind `VeldaCloudKitEnabled`
+// in `Info.plist` so builds without an active iCloud container fall back gracefully to Drive export.
+
 import CloudKit
 import Foundation
 import UIKit

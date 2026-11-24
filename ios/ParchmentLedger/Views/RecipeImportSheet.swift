@@ -1,3 +1,9 @@
+// MARK: - AI Recipe Import Sheet
+//
+// Accepts pasted recipe text, recipe webpage URLs, or `.json`/`.md`/`.txt` files and uses the
+// user's configured BYO-AI provider (after explicit confirmation) to structure ingredients, steps,
+// and estimated per-serving nutrition into a saved local recipe.
+
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -100,6 +106,7 @@ struct RecipeImportSheet: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
         }
+        .ledgerToastOverlay(store.toastMessage)
         .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: [.json, .plainText, .text, .utf8PlainText],

@@ -1,3 +1,9 @@
+// MARK: - Custom Exercise Studio Sheet
+//
+// Lets users author, edit, and delete custom movements outside the 588-clip MoveKit catalog,
+// choose a tracking mode (`weighted`, `bodyweight`, or `timed`), and optionally link a MoveKit
+// reference film while keeping exercise definitions cleanly reusable across routines.
+
 import SwiftUI
 
 struct CustomExerciseSheet: View {
@@ -46,6 +52,7 @@ struct CustomExerciseSheet: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
         }
+        .ledgerToastOverlay(store.toastMessage)
         .onAppear {
             sheetEpoch &+= 1
         }
@@ -92,6 +99,7 @@ struct CustomExerciseSheet: View {
                 .buttonStyle(WarmActionButtonStyle())
 
                 Button("Save") {
+                    dismissLedgerKeyboard()
                     let clean = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !clean.isEmpty else {
                         store.showToast("Enter a movement name")
@@ -110,6 +118,7 @@ struct CustomExerciseSheet: View {
                 .buttonStyle(PrimaryActionButtonStyle())
             } else {
                 Button("Done") {
+                    dismissLedgerKeyboard()
                     LedgerHaptics.light()
                     dismiss()
                 }

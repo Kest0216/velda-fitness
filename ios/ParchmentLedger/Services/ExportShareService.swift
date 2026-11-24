@@ -1,3 +1,9 @@
+// MARK: - Portable Export & Import Service
+//
+// Serializes individual recipes, workout routines, scoped domains, or full ledger snapshots to
+// human-readable Markdown (`.md`), plain text (`.txt`), or schema-versioned `.json` files in
+// temporary storage, and detects snapshot vs single-routine vs single-recipe payloads on JSON import.
+
 import Foundation
 
 enum ExportImportResult {

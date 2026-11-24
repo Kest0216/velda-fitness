@@ -1,3 +1,9 @@
+// MARK: - Diet & Macros Pillar View
+//
+// Daily nutrition tracker displaying calorie and macronutrient progress alongside U.S. FDA Daily Value
+// upper limits (Sodium 2,300 mg, Sugar 50 g, Cholesterol 300 mg), customizable targets, saved-recipe
+// quick-logging, optional BYO-AI meal estimation, and multi-day nutrient trend charts.
+
 import SwiftUI
 
 struct MacrosView: View {
@@ -132,15 +138,17 @@ struct MacrosView: View {
         let t = store.macroTargets
 
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: 6) {
                 SectionHeaderView(
                     title: "Daily Totals",
                     subtitle: "\(d.kcal) / \(t.kcal) KCAL GOAL"
                 )
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
 
-                Spacer(minLength: 6)
+                Spacer(minLength: 4)
 
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Button {
                         LedgerHaptics.light()
                         showMacroTrends = true
@@ -152,6 +160,7 @@ struct MacrosView: View {
                         }
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: false))
+                    .fixedSize(horizontal: true, vertical: false)
 
                     Button(showTargetEditor ? "Close" : "Targets") {
                         LedgerHaptics.light()
@@ -163,6 +172,7 @@ struct MacrosView: View {
                         }
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: showTargetEditor))
+                    .fixedSize(horizontal: true, vertical: false)
                 }
             }
 
@@ -284,6 +294,7 @@ struct MacrosView: View {
                     cholesterolMg: max(50, Int(targetCholesterolDraft) ?? fallback.cholesterolMg)
                 )
                 store.updateMacroTargets(targets)
+                dismissLedgerKeyboard()
                 withAnimation(.easeInOut(duration: 0.2)) {
                     showTargetEditor = false
                 }
@@ -346,7 +357,8 @@ struct MacrosView: View {
                 subtitle: "ADD TO \(mealSlot.uppercased())"
             )
 
-            HStack(spacing: 6) {
+            // 2x2 grid keeps "BREAKFAST" untruncated on narrow viewports.
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
                 ForEach(mealSlots, id: \.self) { slot in
                     Button(slot) {
                         LedgerHaptics.light()
@@ -380,6 +392,7 @@ struct MacrosView: View {
                 .warmRecessedField()
 
             Button("Save Meal Entry") {
+                dismissLedgerKeyboard()
                 let clean = foodName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !clean.isEmpty else {
                     store.showToast("Enter a meal or food name")
@@ -555,10 +568,11 @@ struct MacrosView: View {
     // MARK: - Logged Meals List & Sources
 
     private var loggedMealsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let entryCount = store.dailyMacros.entries.count
+        return VStack(alignment: .leading, spacing: 10) {
             SectionHeaderView(
                 title: "Logged Meals",
-                subtitle: "\(store.dailyMacros.entries.count) ENTRIES ON \(DatabaseManager.mediumDateLabel(store.macroDate).uppercased())"
+                subtitle: "\(entryCount) \(entryCount == 1 ? "ENTRY" : "ENTRIES") ON \(DatabaseManager.mediumDateLabel(store.macroDate).uppercased())"
             )
 
             if store.dailyMacros.entries.isEmpty {

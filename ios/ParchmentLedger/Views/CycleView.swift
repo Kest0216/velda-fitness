@@ -1,3 +1,9 @@
+// MARK: - Cycle Tracker Pillar View
+//
+// Informational personal cycle journal featuring a color-coded monthly phase calendar (`Period`,
+// `Predicted`, `Follicular`, `Ovulatory`, `Luteal`), daily flow/symptom/mood/energy/BBT logging,
+// non-diagnostic cycle regularity notices, and published clinical references.
+
 import SwiftUI
 
 struct CycleView: View {
@@ -208,17 +214,19 @@ struct CycleView: View {
                 }
             }
 
-            // Color-coded phase legend
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    legendChip(color: LedgerColor.cycleRose.opacity(0.45), label: "Period", dashed: false)
-                    legendChip(color: LedgerColor.cycleRose.opacity(0.25), label: "Predicted", dashed: true)
-                    legendChip(color: LedgerColor.phaseFollicular.opacity(0.45), label: "Follicular", dashed: false)
-                    legendChip(color: LedgerColor.phaseOvulatory.opacity(0.45), label: "Ovulatory", dashed: false)
-                    legendChip(color: LedgerColor.phaseLuteal.opacity(0.42), label: "Luteal", dashed: false)
-                }
-                .padding(.top, 4)
+            // Multi-row wrapping legend ensures all 5 phase swatches remain visible on narrow screens.
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 76), spacing: 8)],
+                alignment: .leading,
+                spacing: 6
+            ) {
+                legendChip(color: LedgerColor.cycleRose.opacity(0.45), label: "Period", dashed: false)
+                legendChip(color: LedgerColor.cycleRose.opacity(0.25), label: "Predicted", dashed: true)
+                legendChip(color: LedgerColor.phaseFollicular.opacity(0.45), label: "Follicular", dashed: false)
+                legendChip(color: LedgerColor.phaseOvulatory.opacity(0.45), label: "Ovulatory", dashed: false)
+                legendChip(color: LedgerColor.phaseLuteal.opacity(0.42), label: "Luteal", dashed: false)
             }
+            .padding(.top, 4)
         }
         .softPanel()
     }
@@ -445,6 +453,7 @@ struct CycleView: View {
             }
 
             Button(existing != nil ? "Update Cycle Day" : "Save Cycle Day") {
+                dismissLedgerKeyboard()
                 let verb = existing != nil ? "Update" : "Save"
                 let summaryDesc = flowDraft == .none ? "no flow" : "\(flowDraft.label.lowercased()) flow"
                 pendingConfirm = PendingActionConfirmation(
@@ -485,12 +494,14 @@ struct CycleView: View {
                         Text("\(DatabaseManager.mediumDateLabel(p.startDate)) – \(DatabaseManager.mediumDateLabel(p.endDate))")
                             .font(LedgerFont.serifMd(semibold: true))
                             .foregroundStyle(LedgerColor.inkPrimary)
+                        let bleedUnit = p.durationDays == 1 ? "day" : "days"
                         if let cyc = p.cycleLengthDays {
-                            Text("Cycle length: \(cyc) days · Bleed: \(p.durationDays) days")
+                            let cycleUnit = cyc == 1 ? "day" : "days"
+                            Text("Cycle length: \(cyc) \(cycleUnit) · Bleed: \(p.durationDays) \(bleedUnit)")
                                 .font(LedgerFont.sansSm())
                                 .foregroundStyle(LedgerColor.inkSecondary)
                         } else {
-                            Text("Bleed duration: \(p.durationDays) days")
+                            Text("Bleed duration: \(p.durationDays) \(bleedUnit)")
                                 .font(LedgerFont.sansSm())
                                 .foregroundStyle(LedgerColor.inkSecondary)
                         }

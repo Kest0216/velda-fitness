@@ -1,3 +1,10 @@
+// MARK: - Bring-Your-Own-AI Provider Adapter
+//
+// Stateless client routing optional AI tasks (web recipe discovery, recipe text/URL import, meal
+// macro estimation, workout routine assembly, and dish image generation) directly to the user's
+// chosen provider: Gemini (`generativelanguage.googleapis.com`), OpenAI (API key or ChatGPT OAuth),
+// or Anthropic (text-only; image generation explicitly excluded).
+
 import Foundation
 
 enum AIProviderError: LocalizedError {

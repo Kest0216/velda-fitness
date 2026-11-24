@@ -1,3 +1,9 @@
+// MARK: - Apple Keychain Credential Store
+//
+// Stores user-supplied AI API keys and ChatGPT OAuth tokens encrypted in Apple Keychain
+// (`kSecAttrSynchronizable` first so credentials sync privately with the user's Apple ID, falling
+// back to device-local keychain when iCloud Keychain entitlement is unavailable).
+
 import Foundation
 import Security
 

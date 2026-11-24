@@ -1,3 +1,9 @@
+// MARK: - Domain & Persistence Models
+//
+// Pure Swift value types shared across SQLite persistence, SwiftUI views, JSON exports, and BYO-AI
+// payloads. Includes U.S. FDA Daily Value defaults (`MacroTargets.default`), backward-compatible
+// `Codable` initializers for older snapshots, progression trend summaries, and cycle phase enums.
+
 import Foundation
 
 enum Pillar: String, CaseIterable, Identifiable {

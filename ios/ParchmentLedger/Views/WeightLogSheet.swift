@@ -1,3 +1,8 @@
+// MARK: - Body Weight Ledger Sheet
+//
+// Presents the Weight Over Time canvas (with area fill, linear regression trendline, and 30D/90D/ALL
+// filters), date-stepped weigh-in entry/editing, and reverse-chronological history with deltas.
+
 import SwiftUI
 
 struct WeightLogSheet: View {
@@ -72,6 +77,7 @@ struct WeightLogSheet: View {
             .padding(.top, 20)
             .padding(.bottom, 16)
         }
+        .ledgerToastOverlay(store.toastMessage)
         .onAppear {
             entryDate = store.selectedDate
             syncDraftFields(for: store.selectedDate)
@@ -90,6 +96,7 @@ struct WeightLogSheet: View {
             Spacer()
 
             Button("Done") {
+                dismissLedgerKeyboard()
                 LedgerHaptics.light()
                 dismiss()
             }
@@ -302,6 +309,7 @@ struct WeightLogSheet: View {
     }
 
     private func requestSubmitConfirmation() {
+        dismissLedgerKeyboard()
         let cleaned = weightText
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: ",", with: ".")
