@@ -59,8 +59,8 @@ final class DatabaseManager: @unchecked Sendable {
         createTables()
         migrateSchemaIfNeeded()
         syncMoveKitManifest()
-        seedInitialDataIfNeeded()
-        migrateLegacyRoutinesIfNeeded()
+        initializeDefaultSettingsIfNeeded()
+        purgeLegacyDemoDataOnce()
         _ = runStorageJanitorInternal(aggressive: false)
     }
 
@@ -336,39 +336,7 @@ final class DatabaseManager: @unchecked Sendable {
         exec("COMMIT;")
     }
 
-    private func findExerciseId(_ candidates: [String]) -> String? {
-        guard let db = db else { return nil }
-        for stem in candidates {
-            let exact = "mk_\(stem)"
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT id FROM exercises WHERE id = ? LIMIT 1", -1, &stmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(stmt, 1, exact, -1, SQLITE_TRANSIENT)
-                if sqlite3_step(stmt) == SQLITE_ROW, let ptr = sqlite3_column_text(stmt, 0) {
-                    let res = String(cString: ptr)
-                    sqlite3_finalize(stmt)
-                    return res
-                }
-            }
-            sqlite3_finalize(stmt)
-        }
-        for stem in candidates {
-            let pat = "mk_%\(stem)%"
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT id FROM exercises WHERE id LIKE ? LIMIT 1", -1, &stmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(stmt, 1, pat, -1, SQLITE_TRANSIENT)
-                if sqlite3_step(stmt) == SQLITE_ROW, let ptr = sqlite3_column_text(stmt, 0) {
-                    let res = String(cString: ptr)
-                    sqlite3_finalize(stmt)
-                    return res
-                }
-            }
-            sqlite3_finalize(stmt)
-        }
-        return nil
-    }
-
-    private func seedInitialDataIfNeeded() {
-        let stamp = Self.nowISO()
+    private func initializeDefaultSettingsIfNeeded() {
         if scalarInt("SELECT COUNT(*) FROM app_settings") == 0 {
             setSettingInternal(key: "weight_unit", value: "lbs")
             setSettingInternal(key: "cache_ttl_days", value: "60")
@@ -377,533 +345,86 @@ final class DatabaseManager: @unchecked Sendable {
         }
         // Enforce 60-day fixed Discover cache TTL across existing and new ledgers
         setSettingInternal(key: "cache_ttl_days", value: "60")
+        setSettingInternal(key: "routines_v2_migrated", value: "1")
 
         if scalarInt("SELECT COUNT(*) FROM macro_targets") == 0 {
-            exec("INSERT OR IGNORE INTO macro_targets (id, kcal, protein_g, carbs_g, fat_g) VALUES (1, 2200, 160, 220, 70);")
-        }
-
-        if scalarInt("SELECT COUNT(*) FROM day_routines") == 0 && getSettingInternal("routines_v2_migrated", default: "") != "1" {
-            let daySpecs: [(Int, String, [[String]])] = [
-                (0, "Lower Strength", [
-                    ["barbell-squat"],
-                    ["barbell-romanian-deadlift"],
-                    ["forward-lunge", "barbell-lunge"],
-                    ["bodyweight-donkey-calf-raise", "bent-knee-soleus-raise"],
-                ]),
-                (1, "Upper Push & Shoulders", [
-                    ["barbell-bench-press", "wide-grip-barbell-bench-press"],
-                    ["arnold-press", "barbell-overhead-press"],
-                    ["cable-low-to-high-fly", "cable-pec-fly"],
-                    ["ez-bar-skullcrusher", "cable-rope-pushdown"],
-                ]),
-                (2, "Upper Pull & Arms", [
-                    ["weighted-pull-ups", "chin-ups"],
-                    ["barbell-bent-over-row", "chest-supported-dumbbell-row"],
-                    ["cable-seated-rope-face-pull", "band-high-face-pull"],
-                    ["alternating-hammer-curl", "barbell-curl"],
-                ]),
-                (3, "Mobility & Core", [
-                    ["90-90-hip-switches"],
-                    ["worlds-greatest-stretch"],
-                    ["cable-pallof-press", "front-plank"],
-                    ["assault-bike", "arc-trainer"],
-                ]),
-                (4, "Posterior Chain & Press", [
-                    ["barbell-deadlift", "barbell-rack-pull"],
-                    ["barbell-incline-bench-press", "floor-press"],
-                    ["b-stance-hip-thrust", "barbell-hip-thrust"],
-                    ["band-lateral-raise", "cable-low-single-arm-lateral-raise"],
-                ]),
-                (5, "Kettlebell & Conditioning", [
-                    ["double-kettlebell-clean-and-press", "kettlebell-swing"],
-                    ["goblet-squat-prying-hold", "front-squat"],
-                    ["archer-push-up", "wide-push-up"],
-                    ["band-assisted-pull-up", "wide-grip-lat-pulldown"],
-                ]),
-                (6, "Rest & Recovery", []),
-            ]
-
-            for (dow, title, groups) in daySpecs {
-                insertRoutine(dayOfWeek: dow, title: title, stamp: stamp)
-                var order = 0
-                for cands in groups {
-                    if let exId = findExerciseId(cands) {
-                        insertRoutineExercise(dayOfWeek: dow, exerciseId: exId, sortOrder: order)
-                        order += 1
-                    }
-                }
-            }
-
-            let today = Date()
-            let todayStr = Self.isoDate(today)
-            let todayDow = Self.weekdayIndex(today)
-            let wedExercises = routineExerciseIds(dayOfWeek: 2)
-            let todayExercises = routineExerciseIds(dayOfWeek: todayDow)
-
-            let cal = Calendar.current
-            let pastDates = [28, 21, 14, 7].compactMap { offset -> String? in
-                guard let d = cal.date(byAdding: .day, value: -offset, to: today) else { return nil }
-                return Self.isoDate(d)
-            }
-
-            let upwardProfiles: [[[(Int, Double)]]] = [
-                [
-                    [(6, 20), (6, 20), (5, 20)],
-                    [(6, 25), (6, 25), (6, 25)],
-                    [(7, 25), (7, 25), (6, 25)],
-                    [(8, 30), (7, 30), (7, 30)],
-                ],
-                [
-                    [(8, 135), (8, 135), (8, 135)],
-                    [(8, 145), (8, 145), (7, 145)],
-                    [(9, 145), (8, 145), (8, 145)],
-                    [(8, 155), (8, 155), (8, 155)],
-                ],
-                [
-                    [(12, 45), (12, 45), (12, 45)],
-                    [(14, 45), (14, 45), (12, 45)],
-                    [(12, 55), (12, 55), (12, 55)],
-                    [(15, 55), (14, 55), (14, 55)],
-                ],
-                [
-                    [(10, 35), (10, 35), (10, 35)],
-                    [(10, 35), (10, 35), (9, 35)],
-                    [(10, 35), (9, 35), (9, 35)],
-                    [(9, 35), (9, 35), (8, 35)],
-                ],
-            ]
-
-            var seededSetIds = Set<String>()
-            for exList in [wedExercises, todayExercises] {
-                for (idx, exId) in exList.enumerated() {
-                    if seededSetIds.contains(exId) { continue }
-                    seededSetIds.insert(exId)
-                    let profile = upwardProfiles[idx % upwardProfiles.count]
-                    for (dStr, setsList) in zip(pastDates, profile) {
-                        for (sIdx, pair) in setsList.enumerated() {
-                            insertWorkoutSetRaw(
-                                sessionDate: dStr,
-                                exerciseId: exId,
-                                setNumber: sIdx + 1,
-                                reps: pair.0,
-                                weight: pair.1,
-                                completed: true,
-                                stamp: stamp
-                            )
-                        }
-                    }
-                }
-            }
-
-            for (idx, exId) in todayExercises.enumerated() {
-                if idx == 0 {
-                    for (sIdx, pair) in [(8, 35.0), (8, 35.0), (7, 35.0)].enumerated() {
-                        insertWorkoutSetRaw(
-                            sessionDate: todayStr,
-                            exerciseId: exId,
-                            setNumber: sIdx + 1,
-                            reps: pair.0,
-                            weight: pair.1,
-                            completed: true,
-                            stamp: stamp
-                        )
-                    }
-                } else if idx == 1 {
-                    insertWorkoutSetRaw(sessionDate: todayStr, exerciseId: exId, setNumber: 1, reps: 8, weight: 160, completed: true, stamp: stamp)
-                    insertWorkoutSetRaw(sessionDate: todayStr, exerciseId: exId, setNumber: 2, reps: 8, weight: 160, completed: false, stamp: stamp)
-                    insertWorkoutSetRaw(sessionDate: todayStr, exerciseId: exId, setNumber: 3, reps: 8, weight: 160, completed: false, stamp: stamp)
-                }
-            }
-        }
-
-        if scalarInt("SELECT COUNT(*) FROM recipes") == 0 {
-            seedStarterRecipes(stamp: stamp)
+            exec("INSERT OR IGNORE INTO macro_targets (id, kcal, protein_g, carbs_g, fat_g, sodium_mg, sugar_g, cholesterol_mg) VALUES (1, 2200, 160, 220, 70, 2300, 50, 300);")
         }
     }
 
-    private func migrateLegacyRoutinesIfNeeded() {
+    /// Removes legacy seeded demo routines, starter recipes, and demo workout sets once on existing TestFlight upgrades without deleting real user logs.
+    private func purgeLegacyDemoDataOnce() {
         guard let db = db else { return }
-        if getSettingInternal("routines_v2_migrated", default: "") == "1" {
+        if getSettingInternal("demo_data_purged_v1", default: "") == "1" {
             return
         }
 
-        let stamp = Self.nowISO()
-        var legacyDays: [(Int, String)] = []
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT day_of_week, title FROM day_routines ORDER BY day_of_week ASC", -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let dow = Int(sqlite3_column_int(stmt, 0))
-                let title = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "Routine"
-                legacyDays.append((dow, title))
-            }
-        }
-        sqlite3_finalize(stmt)
-
-        exec("BEGIN IMMEDIATE;")
-        for (dow, title) in legacyDays {
-            let exIds = routineExerciseIds(dayOfWeek: dow)
-            guard !exIds.isEmpty else { continue }
-            let rid = "rt_seed_\(dow)"
-            insertRoutineRowInternal(id: rid, title: title, createdAt: stamp, updatedAt: stamp)
-            for (idx, exId) in exIds.enumerated() {
-                insertRoutineItemInternal(routineId: rid, exerciseId: exId, sortOrder: idx)
-            }
-            var wsStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO weekly_schedule (day_of_week, routine_id) VALUES (?, ?)", -1, &wsStmt, nil) == SQLITE_OK {
-                sqlite3_bind_int(wsStmt, 1, Int32(dow))
-                sqlite3_bind_text(wsStmt, 2, rid, -1, SQLITE_TRANSIENT)
-                sqlite3_step(wsStmt)
-            }
-            sqlite3_finalize(wsStmt)
-        }
-        exec("COMMIT;")
-        setSettingInternal(key: "routines_v2_migrated", value: "1")
-    }
-
-    private func seedStarterRecipes(stamp: String) {
-        struct SeedRec {
-            let id: String
-            let title: String
-            let url: String
-            let prep: String
-            let servings: Int
-            let kcal: Int
-            let p: Int
-            let c: Int
-            let f: Int
-            let meal: String
-            let tags: [String]
-            let allergens: [String]
-            let ingredients: [String]
-            let steps: [String]
-            let saved: Bool
-            let bg: UIColor
-            let accent: UIColor
-        }
-
-        let seeds: [SeedRec] = [
-            SeedRec(
-                id: "rec_miso_salmon",
-                title: "Miso Glazed Salmon & Buckwheat Bowl",
-                url: "https://www.justonecookbook.com/miso-salmon/",
-                prep: "20 min",
-                servings: 2,
-                kcal: 590, p: 44, c: 46, f: 24,
-                meal: "Dinner",
-                tags: ["High-Protein", "Dairy-Free", "Nut-Free"],
-                allergens: ["Fish", "Soy", "Sesame"],
-                ingredients: [
-                    "2 wild salmon fillets (170g each)",
-                    "2 tbsp white miso paste + 1 tbsp mirin",
-                    "1 tsp toasted sesame oil + 1 tsp grated ginger",
-                    "1 cup toasted buckwheat groats, cooked",
-                    "2 cups baby bok choy, steamed",
-                ],
-                steps: [
-                    "Whisk white miso, mirin, ginger, and sesame oil; brush over salmon fillets.",
-                    "Broil or pan-sear skin-side down 6–8 minutes until caramelized and flaky.",
-                    "Serve over warm buckwheat with steamed bok choy and sesame seeds.",
-                ],
-                saved: true,
-                bg: UIColor(red: 0.84, green: 0.54, blue: 0.42, alpha: 1),
-                accent: UIColor(red: 0.66, green: 0.28, blue: 0.19, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_lemon_chicken",
-                title: "Cast-Iron Lemon Herb Chicken & Sweet Potato",
-                url: "https://www.seriouseats.com/crispy-pan-seared-chicken-breast-recipe",
-                prep: "25 min",
-                servings: 2,
-                kcal: 540, p: 49, c: 48, f: 16,
-                meal: "Dinner",
-                tags: ["High-Protein", "Gluten-Free", "Dairy-Free", "Nut-Free"],
-                allergens: [],
-                ingredients: [
-                    "400g boneless skinless chicken breast, butterflied",
-                    "350g sweet potato, 1/2-inch cubes",
-                    "2 tbsp extra-virgin olive oil",
-                    "Fresh rosemary, thyme, 2 smashed garlic cloves",
-                    "1 lemon (zest and juice) + flaky sea salt",
-                ],
-                steps: [
-                    "Roast cubed sweet potatoes with olive oil, rosemary, and salt at 425°F for 20 min.",
-                    "Sear seasoned chicken in cast iron 4–5 min per side; finish with lemon juice and thyme.",
-                    "Slice rested chicken and plate alongside crisp roasted sweet potatoes.",
-                ],
-                saved: true,
-                bg: UIColor(red: 0.79, green: 0.65, blue: 0.41, alpha: 1),
-                accent: UIColor(red: 0.28, green: 0.42, blue: 0.23, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_matcha_chia",
-                title: "Matcha Chia Overnight Oats",
-                url: "https://www.budgetbytes.com/overnight-oats/",
-                prep: "5 min",
-                servings: 1,
-                kcal: 410, p: 28, c: 48, f: 11,
-                meal: "Breakfast",
-                tags: ["Gluten-Free", "Nut-Free", "Vegetarian"],
-                allergens: ["Dairy"],
-                ingredients: [
-                    "60g rolled oats + 1 tbsp black chia seeds",
-                    "1 tsp ceremonial matcha whisked in warm water",
-                    "180ml oat milk + 120g Greek yogurt",
-                    "1 tsp maple syrup + pinch of sea salt",
-                ],
-                steps: [
-                    "Whisk matcha smooth in 2 tbsp warm water with zero clumps.",
-                    "Stir oats, chia, yogurt, milk, and matcha in a jar; refrigerate at least 4 hours.",
-                    "Top with sliced banana or berries before serving.",
-                ],
-                saved: true,
-                bg: UIColor(red: 0.52, green: 0.64, blue: 0.45, alpha: 1),
-                accent: UIColor(red: 0.34, green: 0.50, blue: 0.30, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_crispy_tofu",
-                title: "Crispy Chili Garlic Tofu & Jasmine Rice",
-                url: "https://www.budgetbytes.com/pan-fried-sesame-tofu-with-broccoli/",
-                prep: "22 min",
-                servings: 2,
-                kcal: 480, p: 27, c: 54, f: 18,
-                meal: "Lunch",
-                tags: ["Dairy-Free", "Nut-Free", "Vegetarian"],
-                allergens: ["Soy", "Sesame"],
-                ingredients: [
-                    "400g extra-firm tofu, pressed and cubed",
-                    "2 tbsp cornstarch + 2 tbsp tamari",
-                    "1 tbsp chili crisp + 1 tsp rice vinegar",
-                    "2 cups steamed broccoli florets",
-                    "2 cups cooked jasmine rice",
-                ],
-                steps: [
-                    "Toss cubed tofu in cornstarch and crisp in a hot skillet until golden.",
-                    "Whisk tamari, chili crisp, garlic, and vinegar; glaze tofu and broccoli.",
-                    "Serve immediately over steamed jasmine rice.",
-                ],
-                saved: false,
-                bg: UIColor(red: 0.74, green: 0.35, blue: 0.24, alpha: 1),
-                accent: UIColor(red: 0.85, green: 0.64, blue: 0.38, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_turkey_meatballs",
-                title: "Mediterranean Herb Turkey Meatballs & Tzatziki",
-                url: "https://www.recipetineats.com/greek-turkey-meatballs/",
-                prep: "25 min",
-                servings: 3,
-                kcal: 465, p: 42, c: 22, f: 22,
-                meal: "Lunch",
-                tags: ["High-Protein", "Gluten-Free", "Nut-Free"],
-                allergens: ["Dairy", "Eggs"],
-                ingredients: [
-                    "500g lean ground turkey + 1 egg",
-                    "2 tbsp chopped fresh dill, oregano, grated garlic",
-                    "150g strained Greek yogurt + grated cucumber",
-                    "Cherry tomatoes & Kalamata olives on the side",
-                ],
-                steps: [
-                    "Mix turkey, egg, oregano, dill, and salt; roll into 15 meatballs.",
-                    "Bake at 425°F for 16 minutes until browned and cooked through.",
-                    "Fold cucumber, lemon, and dill into yogurt; serve with tomatoes and olives.",
-                ],
-                saved: false,
-                bg: UIColor(red: 0.69, green: 0.54, blue: 0.40, alpha: 1),
-                accent: UIColor(red: 0.66, green: 0.24, blue: 0.21, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_shrimp_tacos",
-                title: "Cilantro Lime Shrimp & Avocado Corn Tacos",
-                url: "https://www.pinchofyum.com/spicy-shrimp-tacos-with-garlic-cilantro-lime-slaw",
-                prep: "18 min",
-                servings: 2,
-                kcal: 430, p: 36, c: 42, f: 14,
-                meal: "Dinner",
-                tags: ["High-Protein", "Gluten-Free", "Dairy-Free", "Nut-Free"],
-                allergens: ["Shellfish"],
-                ingredients: [
-                    "340g peeled wild shrimp, patted dry",
-                    "1 tsp smoked paprika + 1/2 tsp cumin",
-                    "6 warm corn tortillas",
-                    "Shredded red cabbage, cilantro, 1 avocado, lime juice",
-                ],
-                steps: [
-                    "Toss shrimp with paprika, cumin, olive oil, and salt; sear 2 minutes per side.",
-                    "Toss cabbage with fresh lime juice and chopped cilantro.",
-                    "Layer warm corn tortillas with slaw, charred shrimp, and sliced avocado.",
-                ],
-                saved: false,
-                bg: UIColor(red: 0.83, green: 0.50, blue: 0.36, alpha: 1),
-                accent: UIColor(red: 0.46, green: 0.60, blue: 0.29, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_steak_chimichurri",
-                title: "Seared Flank Steak & Parsley Chimichurri",
-                url: "https://www.seriouseats.com/sauced-chimichurri-sauce-recipe",
-                prep: "20 min",
-                servings: 3,
-                kcal: 510, p: 46, c: 8, f: 32,
-                meal: "Dinner",
-                tags: ["High-Protein", "Gluten-Free", "Dairy-Free", "Nut-Free"],
-                allergens: [],
-                ingredients: [
-                    "550g flank steak, kosher salt & black pepper",
-                    "1 cup flat-leaf parsley + 3 tbsp fresh oregano, finely chopped",
-                    "3 garlic cloves + 2 tbsp red wine vinegar + 1/3 cup olive oil",
-                    "Red pepper flakes to taste",
-                ],
-                steps: [
-                    "Combine finely chopped parsley, oregano, garlic, vinegar, olive oil, and chili flakes.",
-                    "Sear salted flank steak in a hot cast-iron skillet 4 min per side; rest 8 min.",
-                    "Slice thinly against the grain and spoon vibrant chimichurri over top.",
-                ],
-                saved: false,
-                bg: UIColor(red: 0.61, green: 0.34, blue: 0.27, alpha: 1),
-                accent: UIColor(red: 0.25, green: 0.48, blue: 0.23, alpha: 1)
-            ),
-            SeedRec(
-                id: "rec_chickpea_shakshuka",
-                title: "Spiced Chickpea & Roasted Pepper Skillet",
-                url: "https://www.bonappetit.com/recipe/chickpea-shakshuka",
-                prep: "24 min",
-                servings: 2,
-                kcal: 395, p: 19, c: 46, f: 15,
-                meal: "Breakfast",
-                tags: ["Gluten-Free", "Dairy-Free", "Nut-Free", "Vegetarian"],
-                allergens: ["Eggs"],
-                ingredients: [
-                    "1 can chickpeas, drained + 1 roasted red pepper, sliced",
-                    "1 can crushed fire-roasted tomatoes",
-                    "1 tsp smoked paprika + 1 tsp ground cumin + 2 garlic cloves",
-                    "4 pasture-raised eggs + fresh parsley",
-                ],
-                steps: [
-                    "Simmer garlic, cumin, paprika, tomatoes, peppers, and chickpeas for 10 minutes until thick.",
-                    "Make four wells and crack eggs into the skillet; cover 5 minutes until whites set.",
-                    "Finish with cracked pepper and fresh parsley.",
-                ],
-                saved: false,
-                bg: UIColor(red: 0.76, green: 0.31, blue: 0.20, alpha: 1),
-                accent: UIColor(red: 0.92, green: 0.78, blue: 0.34, alpha: 1)
-            ),
-        ]
-
-        for s in seeds {
-            let sub = s.saved ? "saved" : "cache"
-            let fname = "\(s.id).jpg"
-            let dest = (s.saved ? savedMediaDir : cacheMediaDir).appendingPathComponent(fname)
-            let imgPath: String?
-            if renderStarterPlateJPEG(to: dest, mainColor: s.bg, accentColor: s.accent) {
-                imgPath = "\(sub)/\(fname)"
-            } else {
-                imgPath = nil
-            }
-            let domain = URL(string: s.url)?.host?.replacingOccurrences(of: "www.", with: "") ?? "web"
-            let rec = Recipe(
-                id: s.id,
-                title: s.title,
-                sourceURL: s.url,
-                sourceDomain: domain,
-                prepTime: s.prep,
-                servings: s.servings,
-                kcal: s.kcal,
-                proteinG: s.p,
-                carbsG: s.c,
-                fatG: s.f,
-                mealType: s.meal,
-                dietaryTags: s.tags,
-                allergens: s.allergens,
-                ingredients: s.ingredients,
-                steps: s.steps,
-                imagePath: imgPath,
-                imageSource: imgPath != nil ? "generated" : "placeholder",
-                isSaved: s.saved,
-                discoveredAt: stamp,
-                savedAt: s.saved ? stamp : nil
-            )
-            insertRecipeRow(rec)
-        }
-    }
-
-    private func renderStarterPlateJPEG(to dest: URL, mainColor: UIColor, accentColor: UIColor) -> Bool {
-        let size = CGSize(width: 480, height: 480)
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let image = renderer.image { ctx in
-            let cg = ctx.cgContext
-            UIColor(red: 0.88, green: 0.83, blue: 0.74, alpha: 1).setFill()
-            cg.fill(CGRect(origin: .zero, size: size))
-
-            let center = CGPoint(x: 240, y: 240)
-            // Outer ink plate ring
-            UIColor(red: 0.14, green: 0.13, blue: 0.11, alpha: 1).setStroke()
-            cg.setLineWidth(4)
-            cg.strokeEllipse(in: CGRect(x: 42, y: 42, width: 396, height: 396))
-
-            cg.setLineWidth(2)
-            UIColor(red: 0.30, green: 0.27, blue: 0.23, alpha: 0.65).setStroke()
-            cg.strokeEllipse(in: CGRect(x: 62, y: 62, width: 356, height: 356))
-
-            // Main dish wash
-            mainColor.setFill()
-            cg.fillEllipse(in: CGRect(x: 86, y: 86, width: 308, height: 308))
-
-            // Garnish accents
-            accentColor.setFill()
-            cg.fillEllipse(in: CGRect(x: center.x - 42, y: center.y - 36, width: 84, height: 72))
-            cg.fillEllipse(in: CGRect(x: center.x + 36, y: center.y - 68, width: 42, height: 42))
-            cg.fillEllipse(in: CGRect(x: center.x - 74, y: center.y + 30, width: 46, height: 46))
-        }
-        guard let jpg = image.jpegData(compressionQuality: 0.75) else { return false }
-        try? jpg.write(to: dest, options: .atomic)
-        return FileManager.default.fileExists(atPath: dest.path)
-    }
-
-    // MARK: - Low-level Inserts
-
-    private func insertRoutine(dayOfWeek: Int, title: String, stamp: String) {
-        guard let db = db else { return }
-        var stmt: OpaquePointer?
-        let sql = """
-        INSERT INTO day_routines (day_of_week, title, updated_at) VALUES (?, ?, ?)
-        ON CONFLICT(day_of_week) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at
-        """
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(dayOfWeek))
-            sqlite3_bind_text(stmt, 2, title, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 3, stamp, -1, SQLITE_TRANSIENT)
-            sqlite3_step(stmt)
-        }
-        sqlite3_finalize(stmt)
-    }
-
-    private func insertRoutineExercise(dayOfWeek: Int, exerciseId: String, sortOrder: Int) {
-        guard let db = db else { return }
-        var stmt: OpaquePointer?
-        let sql = "INSERT OR IGNORE INTO routine_exercises (day_of_week, exercise_id, sort_order) VALUES (?, ?, ?)"
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(dayOfWeek))
-            sqlite3_bind_text(stmt, 2, exerciseId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_int(stmt, 3, Int32(sortOrder))
-            sqlite3_step(stmt)
-        }
-        sqlite3_finalize(stmt)
-    }
-
-    private func routineExerciseIds(dayOfWeek: Int) -> [String] {
-        guard let db = db else { return [] }
-        var res: [String] = []
-        var stmt: OpaquePointer?
-        let sql = "SELECT exercise_id FROM routine_exercises WHERE day_of_week = ? ORDER BY sort_order ASC, id ASC"
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(dayOfWeek))
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                if let ptr = sqlite3_column_text(stmt, 0) {
-                    res.append(String(cString: ptr))
+        // Collect exact timestamps generated during initial demo seeding so only matching demo workout sets are removed
+        var seedTimestamps = Set<String>()
+        var tsStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT updated_at FROM day_routines UNION SELECT created_at FROM routines WHERE id LIKE 'rt_seed_%'", -1, &tsStmt, nil) == SQLITE_OK {
+            while sqlite3_step(tsStmt) == SQLITE_ROW {
+                if let ptr = sqlite3_column_text(tsStmt, 0) {
+                    let s = String(cString: ptr)
+                    if !s.isEmpty { seedTimestamps.insert(s) }
                 }
             }
         }
-        sqlite3_finalize(stmt)
-        return res
+        sqlite3_finalize(tsStmt)
+
+        let demoRecipeIds = [
+            "rec_miso_salmon",
+            "rec_lemon_chicken",
+            "rec_matcha_chia",
+            "rec_crispy_tofu",
+            "rec_turkey_meatballs",
+            "rec_shrimp_tacos",
+            "rec_steak_chimichurri",
+            "rec_chickpea_shakshuka",
+        ]
+
+        // Collect starter recipe image paths before deleting rows
+        var demoImagePaths: [String] = []
+        for recId in demoRecipeIds {
+            var qStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT image_path FROM recipes WHERE id = ?", -1, &qStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(qStmt, 1, recId, -1, SQLITE_TRANSIENT)
+                if sqlite3_step(qStmt) == SQLITE_ROW, let ptr = sqlite3_column_text(qStmt, 0) {
+                    demoImagePaths.append(String(cString: ptr))
+                }
+            }
+            sqlite3_finalize(qStmt)
+        }
+
+        exec("BEGIN IMMEDIATE;")
+        for stamp in seedTimestamps {
+            var wsDel: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM workout_sets WHERE updated_at = ?", -1, &wsDel, nil) == SQLITE_OK {
+                sqlite3_bind_text(wsDel, 1, stamp, -1, SQLITE_TRANSIENT)
+                sqlite3_step(wsDel)
+            }
+            sqlite3_finalize(wsDel)
+        }
+
+        exec("DELETE FROM date_schedule WHERE routine_id LIKE 'rt_seed_%';")
+        exec("DELETE FROM weekly_schedule WHERE routine_id LIKE 'rt_seed_%';")
+        exec("DELETE FROM routine_items WHERE routine_id LIKE 'rt_seed_%';")
+        exec("DELETE FROM routines WHERE id LIKE 'rt_seed_%';")
+        exec("DELETE FROM day_routines;")
+        exec("DELETE FROM routine_exercises;")
+
+        for recId in demoRecipeIds {
+            deleteRecipeById(recId)
+        }
+        exec("COMMIT;")
+
+        for path in demoImagePaths {
+            unlinkMedia(path)
+        }
+        setSettingInternal(key: "demo_data_purged_v1", value: "1")
     }
+
+    // MARK: - Low-level Inserts
 
     @discardableResult
     private func insertWorkoutSetRaw(
