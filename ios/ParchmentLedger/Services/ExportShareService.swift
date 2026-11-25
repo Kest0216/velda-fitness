@@ -114,6 +114,7 @@ final class ExportShareService: @unchecked Sendable {
             .compactMap { (0..<weekdayNames.count).contains($0) ? weekdayNames[$0] : nil }
             .joined(separator: ", ")
 
+        let headingTitle = routine.emblem.isEmpty ? routine.title : "\(routine.emblem) \(routine.title)"
         let content: String
         switch format {
         case .json:
@@ -127,7 +128,7 @@ final class ExportShareService: @unchecked Sendable {
 
         case .markdown:
             var lines: [String] = [
-                "# \(routine.title)",
+                "# \(headingTitle)",
                 "",
                 "- **Movements:** \(routine.exercises.count)",
                 "- **Weekly Days:** \(daysLabel.isEmpty ? "Unassigned" : daysLabel)",
@@ -147,8 +148,8 @@ final class ExportShareService: @unchecked Sendable {
 
         case .text:
             var lines: [String] = [
-                routine.title.uppercased(),
-                String(repeating: "-", count: min(48, max(12, routine.title.count))),
+                headingTitle.uppercased(),
+                String(repeating: "-", count: min(48, max(12, headingTitle.count))),
                 "Movements: \(routine.exercises.count) | Schedule: \(daysLabel.isEmpty ? "Unassigned" : daysLabel)",
                 "",
             ]
@@ -223,7 +224,8 @@ final class ExportShareService: @unchecked Sendable {
             lines.append("## Routines (\(snapshot.routines.count))")
             for rt in snapshot.routines {
                 let days = rt.assignedWeekdays.compactMap { (0..<7).contains($0) ? weekdayNames[$0] : nil }.joined(separator: ", ")
-                lines.append("### \(rt.title)\(days.isEmpty ? "" : " (\(days))")")
+                let prefix = rt.emblem.isEmpty ? "" : "\(rt.emblem) "
+                lines.append("### \(prefix)\(rt.title)\(days.isEmpty ? "" : " (\(days))")")
                 for ex in rt.exercises {
                     lines.append("- \(ex.name) [\(ex.muscleHint)]")
                 }

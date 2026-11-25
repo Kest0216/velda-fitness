@@ -56,6 +56,144 @@ struct MoveKitManifestEntry: Codable {
     let muscleHint: String
 }
 
+enum MuscleRegion: String, CaseIterable, Identifiable {
+    case all = "All"
+    case chest = "Chest"
+    case back = "Back"
+    case shoulders = "Shoulders"
+    case arms = "Arms"
+    case legs = "Legs"
+    case core = "Core"
+    case conditioning = "Conditioning"
+    case mobility = "Mobility"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+
+    var subGroups: [MuscleSubGroup] {
+        switch self {
+        case .all: return []
+        case .chest: return [.chest]
+        case .back: return [.lats, .upperBack, .traps, .lowerBack]
+        case .shoulders: return [.frontDelts, .sideDelts, .rearDelts]
+        case .arms: return [.biceps, .triceps, .forearms]
+        case .legs: return [.quads, .hamstrings, .glutes, .calves]
+        case .core: return [.abs, .obliques]
+        case .conditioning: return [.cardio, .fullBodyPlyo]
+        case .mobility: return [.mobility]
+        case .custom: return [.custom]
+        }
+    }
+
+    static var filterRegions: [MuscleRegion] {
+        [.all, .chest, .back, .shoulders, .arms, .legs, .core, .conditioning, .mobility]
+    }
+
+    static var pickerRegions: [MuscleRegion] {
+        [.chest, .back, .shoulders, .arms, .legs, .core, .conditioning, .mobility, .custom]
+    }
+
+    func matches(muscleHint: String, subGroup: MuscleSubGroup?) -> Bool {
+        let normalized = muscleHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let sub = subGroup {
+            return normalized == sub.rawValue.lowercased()
+        }
+        if self == .all {
+            return true
+        }
+        if subGroups.contains(where: { $0.rawValue.lowercased() == normalized }) {
+            return true
+        }
+        switch self {
+        case .chest: return normalized == "push"
+        case .back: return normalized == "pull" || normalized == "back"
+        case .shoulders: return normalized == "shoulders"
+        case .arms: return normalized == "arms"
+        case .legs: return normalized == "legs"
+        case .core: return normalized == "core"
+        case .conditioning: return normalized == "strength" || normalized == "conditioning"
+        case .mobility: return normalized == "mobility"
+        case .custom: return normalized == "custom"
+        case .all: return true
+        }
+    }
+}
+
+enum MuscleSubGroup: String, CaseIterable, Identifiable {
+    case chest = "Chest"
+    case lats = "Lats"
+    case upperBack = "Upper Back"
+    case traps = "Traps"
+    case lowerBack = "Lower Back"
+    case frontDelts = "Front Delts"
+    case sideDelts = "Side Delts"
+    case rearDelts = "Rear Delts"
+    case biceps = "Biceps"
+    case triceps = "Triceps"
+    case forearms = "Forearms"
+    case quads = "Quads"
+    case hamstrings = "Hamstrings"
+    case glutes = "Glutes"
+    case calves = "Calves"
+    case abs = "Abs"
+    case obliques = "Obliques"
+    case cardio = "Cardio"
+    case fullBodyPlyo = "Full Body & Plyo"
+    case mobility = "Mobility"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+
+    var region: MuscleRegion {
+        switch self {
+        case .chest: return .chest
+        case .lats, .upperBack, .traps, .lowerBack: return .back
+        case .frontDelts, .sideDelts, .rearDelts: return .shoulders
+        case .biceps, .triceps, .forearms: return .arms
+        case .quads, .hamstrings, .glutes, .calves: return .legs
+        case .abs, .obliques: return .core
+        case .cardio, .fullBodyPlyo: return .conditioning
+        case .mobility: return .mobility
+        case .custom: return .custom
+        }
+    }
+
+    static func fromHint(_ raw: String) -> MuscleSubGroup? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let exact = allCases.first(where: { $0.rawValue.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return exact
+        }
+        switch trimmed.lowercased() {
+        case "push": return .chest
+        case "pull", "back": return .lats
+        case "shoulders": return .frontDelts
+        case "arms": return .biceps
+        case "legs": return .quads
+        case "core": return .abs
+        case "strength", "conditioning": return .fullBodyPlyo
+        case "mobility": return .mobility
+        case "custom": return .custom
+        default: return nil
+        }
+    }
+}
+
+enum RoutineEmblemCatalog {
+    static let shapes: [String] = ["●", "▲", "■", "◆", "★", "✦", "✚", "◉", "△", "□", "◇", "☆"]
+    static let emojis: [String] = ["🏋️", "💪", "🔥", "⚡", "🏃", "🚴", "🏊", "🧘", "🤸", "🥊", "🦵", "🫀", "🧗", "🎯", "⏱️", "☀️", "🌙", "🌿"]
+    static let shapeSet: Set<String> = Set(shapes)
+
+    static func isShape(_ value: String) -> Bool {
+        shapeSet.contains(value)
+    }
+
+    static func sanitize(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return String(trimmed.prefix(2))
+    }
+}
+
 enum ExerciseTrackingType: String, CaseIterable, Identifiable, Codable {
     case weighted
     case bodyweight
@@ -153,8 +291,36 @@ enum ScheduleSource: String, Equatable {
 struct RoutineSummary: Identifiable, Equatable, Codable {
     let id: String
     let title: String
+    var emblem: String = ""
     let exercises: [Exercise]
     let assignedWeekdays: [Int] // 0=Mon .. 6=Sun
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, emblem, exercises, assignedWeekdays
+    }
+
+    init(id: String, title: String, emblem: String = "", exercises: [Exercise], assignedWeekdays: [Int]) {
+        self.id = id
+        self.title = title
+        self.emblem = emblem
+        self.exercises = exercises
+        self.assignedWeekdays = assignedWeekdays
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        emblem = try c.decodeIfPresent(String.self, forKey: .emblem) ?? ""
+        exercises = try c.decode([Exercise].self, forKey: .exercises)
+        assignedWeekdays = try c.decode([Int].self, forKey: .assignedWeekdays)
+    }
+}
+
+struct CalendarRoutineMarker: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let emblem: String
 }
 
 struct WeekDaySlot: Identifiable, Equatable {
@@ -166,6 +332,7 @@ struct WeekDaySlot: Identifiable, Equatable {
     let isToday: Bool
     let hasRoutine: Bool
     let hasLoggedSets: Bool
+    var routineMarkers: [CalendarRoutineMarker] = []
 }
 
 struct MonthDaySlot: Identifiable, Equatable {
@@ -175,6 +342,17 @@ struct MonthDaySlot: Identifiable, Equatable {
     let isToday: Bool
     let hasRoutine: Bool
     let hasLoggedSets: Bool
+    var routineMarkers: [CalendarRoutineMarker] = []
+}
+
+struct DayRoutineSection: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let emblem: String
+    let exercises: [RoutineExerciseItem]
+    let completedExercises: Int
+    let totalExercises: Int
+    let totalSetsDone: Int
 }
 
 struct DayWorkout: Equatable {
@@ -184,14 +362,22 @@ struct DayWorkout: Equatable {
     let sessionDate: String
     let displayDateShort: String
     let isToday: Bool
-    let routineId: String?
     let scheduleSource: ScheduleSource
-    let title: String
-    let exercises: [RoutineExerciseItem]
+    let routines: [DayRoutineSection]
     let completionPct: Int
     let completedExercises: Int
     let totalExercises: Int
     let totalSetsDone: Int
+
+    var hasRoutines: Bool { !routines.isEmpty }
+    var routineId: String? { routines.first?.id }
+    var routineIds: Set<String> { Set(routines.map(\.id)) }
+    var title: String {
+        if routines.isEmpty { return "Rest Day" }
+        if routines.count == 1 { return routines[0].title }
+        return routines.map(\.title).joined(separator: " + ")
+    }
+    var exercises: [RoutineExerciseItem] { routines.flatMap(\.exercises) }
 }
 
 struct Recipe: Identifiable, Equatable, Codable {
