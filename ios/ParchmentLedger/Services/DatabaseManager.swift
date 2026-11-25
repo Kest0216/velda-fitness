@@ -243,6 +243,27 @@ final class DatabaseManager: @unchecked Sendable {
         CREATE INDEX IF NOT EXISTS idx_macro_logs_date
             ON macro_logs(log_date DESC, id DESC);
 
+        CREATE TABLE IF NOT EXISTS saved_meals (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_key TEXT NOT NULL UNIQUE,
+            default_meal_slot TEXT NOT NULL DEFAULT 'Lunch',
+            kcal INTEGER NOT NULL DEFAULT 0,
+            protein_g INTEGER NOT NULL DEFAULT 0,
+            carbs_g INTEGER NOT NULL DEFAULT 0,
+            fat_g INTEGER NOT NULL DEFAULT 0,
+            sodium_mg INTEGER NOT NULL DEFAULT 0,
+            sugar_g INTEGER NOT NULL DEFAULT 0,
+            cholesterol_mg INTEGER NOT NULL DEFAULT 0,
+            notes TEXT NOT NULL DEFAULT '',
+            use_count INTEGER NOT NULL DEFAULT 1,
+            last_used_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_saved_meals_recent
+            ON saved_meals(last_used_at DESC, use_count DESC);
+
         CREATE TABLE IF NOT EXISTS cycle_logs (
             log_date TEXT PRIMARY KEY,
             flow TEXT NOT NULL DEFAULT 'none',
@@ -356,6 +377,27 @@ final class DatabaseManager: @unchecked Sendable {
             COMMIT;
             """)
         }
+
+        let savedMealCols = tableColumns("saved_meals")
+        if !savedMealCols.isEmpty {
+            if !savedMealCols.contains("sodium_mg") {
+                exec("ALTER TABLE saved_meals ADD COLUMN sodium_mg INTEGER NOT NULL DEFAULT 0;")
+            }
+            if !savedMealCols.contains("sugar_g") {
+                exec("ALTER TABLE saved_meals ADD COLUMN sugar_g INTEGER NOT NULL DEFAULT 0;")
+            }
+            if !savedMealCols.contains("cholesterol_mg") {
+                exec("ALTER TABLE saved_meals ADD COLUMN cholesterol_mg INTEGER NOT NULL DEFAULT 0;")
+            }
+            if !savedMealCols.contains("use_count") {
+                exec("ALTER TABLE saved_meals ADD COLUMN use_count INTEGER NOT NULL DEFAULT 1;")
+            }
+            if !savedMealCols.contains("last_used_at") {
+                exec("ALTER TABLE saved_meals ADD COLUMN last_used_at TEXT NOT NULL DEFAULT '';")
+            }
+        }
+
+        backfillSavedMealsFromHistoryOnce()
     }
 
     private func syncMoveKitManifest() {
@@ -2386,6 +2428,7 @@ final class DatabaseManager: @unchecked Sendable {
             let customEx = scalarInt("SELECT COUNT(*) FROM exercises WHERE is_custom = 1")
             let totalSets = scalarInt("SELECT COUNT(*) FROM workout_sets")
             let macroLogs = scalarInt("SELECT COUNT(*) FROM macro_logs")
+            let savedMeals = scalarInt("SELECT COUNT(*) FROM saved_meals")
             let cycleLogs = scalarInt("SELECT COUNT(*) FROM cycle_logs")
 
             let ttl = 60
@@ -2415,6 +2458,7 @@ final class DatabaseManager: @unchecked Sendable {
                 customExerciseCount: customEx,
                 totalSetCount: totalSets,
                 macroLogCount: macroLogs,
+                savedMealCount: savedMeals,
                 cycleLogCount: cycleLogs,
                 hasAPIKey: !rawKey.isEmpty,
                 maskedAPIKey: masked,
@@ -2966,10 +3010,12 @@ final class DatabaseManager: @unchecked Sendable {
         sugarG: Int = 0,
         cholesterolMg: Int = 0,
         recipeId: String? = nil,
-        notes: String = ""
+        notes: String = "",
+        saveAsReusableMeal: Bool = true
     ) -> Int64 {
         queue.sync {
-            insertMacroLogRaw(
+            let stamp = Self.nowISO()
+            let rowId = insertMacroLogRaw(
                 logDate: logDate,
                 mealSlot: mealSlot,
                 name: name,
@@ -2983,9 +3029,387 @@ final class DatabaseManager: @unchecked Sendable {
                 cholesterolMg: cholesterolMg,
                 recipeId: recipeId,
                 notes: notes,
-                createdAt: Self.nowISO()
+                createdAt: stamp
+            )
+            if saveAsReusableMeal && (recipeId?.isEmpty ?? true) {
+                upsertSavedMealInternal(
+                    name: name,
+                    defaultMealSlot: mealSlot,
+                    kcal: kcal,
+                    proteinG: proteinG,
+                    carbsG: carbsG,
+                    fatG: fatG,
+                    sodiumMg: sodiumMg,
+                    sugarG: sugarG,
+                    cholesterolMg: cholesterolMg,
+                    notes: notes,
+                    incrementUsage: true,
+                    lastUsedAt: stamp,
+                    createdAt: stamp
+                )
+            }
+            return rowId
+        }
+    }
+
+    // MARK: - Reusable Saved Meals API
+
+    func listSavedMeals(query: String = "", mealSlot: String? = nil, limit: Int = 200) -> [SavedMeal] {
+        queue.sync {
+            listSavedMealsInternal(query: query, mealSlot: mealSlot, limit: limit)
+        }
+    }
+
+    private func listSavedMealsInternal(query: String = "", mealSlot: String? = nil, limit: Int = 5000) -> [SavedMeal] {
+        guard let db = db else { return [] }
+        var all: [SavedMeal] = []
+        var stmt: OpaquePointer?
+        let sql = """
+        SELECT id, name, default_meal_slot, kcal, protein_g, carbs_g, fat_g,
+               COALESCE(sodium_mg, 0), COALESCE(sugar_g, 0), COALESCE(cholesterol_mg, 0),
+               notes, COALESCE(use_count, 1), last_used_at, created_at
+        FROM saved_meals
+        ORDER BY last_used_at DESC, use_count DESC, name ASC
+        LIMIT ?
+        """
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int(stmt, 1, Int32(max(1, limit)))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                all.append(Self.readSavedMealRow(stmt!))
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        let cleanQ = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanSlot = mealSlot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return all.filter { meal in
+            if !cleanSlot.isEmpty && cleanSlot.caseInsensitiveCompare("All") != .orderedSame {
+                if meal.defaultMealSlot.caseInsensitiveCompare(cleanSlot) != .orderedSame {
+                    return false
+                }
+            }
+            if !cleanQ.isEmpty {
+                let hay = "\(meal.name.lowercased()) \(meal.notes.lowercased())"
+                if !hay.contains(cleanQ) {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    func recordSavedMealUsage(id: String) {
+        queue.sync {
+            guard let db = db, !id.isEmpty else { return }
+            var stmt: OpaquePointer?
+            let sql = "UPDATE saved_meals SET use_count = use_count + 1, last_used_at = ? WHERE id = ?"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, Self.nowISO(), -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    func deleteSavedMeal(id: String) {
+        queue.sync {
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM saved_meals WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    @discardableResult
+    func importSavedMeals(_ meals: [SavedMeal]) -> Int {
+        queue.sync {
+            guard !meals.isEmpty else { return 0 }
+            exec("BEGIN IMMEDIATE;")
+            var count = 0
+            for m in meals {
+                if !m.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    upsertSavedMealInternal(
+                        id: m.id,
+                        name: m.name,
+                        defaultMealSlot: m.defaultMealSlot,
+                        kcal: m.kcal,
+                        proteinG: m.proteinG,
+                        carbsG: m.carbsG,
+                        fatG: m.fatG,
+                        sodiumMg: m.sodiumMg,
+                        sugarG: m.sugarG,
+                        cholesterolMg: m.cholesterolMg,
+                        notes: m.notes,
+                        incrementUsage: false,
+                        useCountOverride: m.useCount,
+                        lastUsedAt: m.lastUsedAt,
+                        createdAt: m.createdAt
+                    )
+                    count += 1
+                }
+            }
+            exec("COMMIT;")
+            return count
+        }
+    }
+
+    func importMacrosBundle(targets: MacroTargets?, logs: [MacroLogEntry], savedMeals: [SavedMeal]) {
+        queue.sync {
+            guard let db = db else { return }
+            let stamp = Self.nowISO()
+            exec("BEGIN IMMEDIATE;")
+            if let targets {
+                var tStmt: OpaquePointer?
+                let tSql = """
+                INSERT INTO macro_targets (id, kcal, protein_g, carbs_g, fat_g, sodium_mg, sugar_g, cholesterol_mg)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kcal = excluded.kcal, protein_g = excluded.protein_g, carbs_g = excluded.carbs_g, fat_g = excluded.fat_g,
+                    sodium_mg = excluded.sodium_mg, sugar_g = excluded.sugar_g, cholesterol_mg = excluded.cholesterol_mg
+                """
+                if sqlite3_prepare_v2(db, tSql, -1, &tStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_int(tStmt, 1, Int32(targets.kcal))
+                    sqlite3_bind_int(tStmt, 2, Int32(targets.proteinG))
+                    sqlite3_bind_int(tStmt, 3, Int32(targets.carbsG))
+                    sqlite3_bind_int(tStmt, 4, Int32(targets.fatG))
+                    sqlite3_bind_int(tStmt, 5, Int32(targets.sodiumMg))
+                    sqlite3_bind_int(tStmt, 6, Int32(targets.sugarG))
+                    sqlite3_bind_int(tStmt, 7, Int32(targets.cholesterolMg))
+                    sqlite3_step(tStmt)
+                }
+                sqlite3_finalize(tStmt)
+            }
+
+            for ml in logs {
+                let exists = scalarInt(
+                    "SELECT COUNT(*) FROM macro_logs WHERE log_date = ? AND name = ? AND kcal = ? AND created_at = ?",
+                    args: [ml.logDate, ml.name, "\(ml.kcal)", ml.createdAt]
+                ) > 0
+                if !exists {
+                    _ = insertMacroLogRaw(
+                        logDate: ml.logDate,
+                        mealSlot: ml.mealSlot,
+                        name: ml.name,
+                        servings: ml.servings,
+                        kcal: ml.kcal,
+                        proteinG: ml.proteinG,
+                        carbsG: ml.carbsG,
+                        fatG: ml.fatG,
+                        sodiumMg: ml.sodiumMg,
+                        sugarG: ml.sugarG,
+                        cholesterolMg: ml.cholesterolMg,
+                        recipeId: ml.recipeId,
+                        notes: ml.notes,
+                        createdAt: ml.createdAt.isEmpty ? stamp : ml.createdAt
+                    )
+                }
+            }
+
+            if !savedMeals.isEmpty {
+                for m in savedMeals {
+                    upsertSavedMealInternal(
+                        id: m.id,
+                        name: m.name,
+                        defaultMealSlot: m.defaultMealSlot,
+                        kcal: m.kcal,
+                        proteinG: m.proteinG,
+                        carbsG: m.carbsG,
+                        fatG: m.fatG,
+                        sodiumMg: m.sodiumMg,
+                        sugarG: m.sugarG,
+                        cholesterolMg: m.cholesterolMg,
+                        notes: m.notes,
+                        incrementUsage: false,
+                        useCountOverride: m.useCount,
+                        lastUsedAt: m.lastUsedAt,
+                        createdAt: m.createdAt
+                    )
+                }
+            } else if !logs.isEmpty {
+                backfillSavedMealsFromMacroLogsInternal(logs)
+            }
+            exec("COMMIT;")
+        }
+    }
+
+    private func upsertSavedMealInternal(
+        id: String? = nil,
+        name: String,
+        defaultMealSlot: String,
+        kcal: Int,
+        proteinG: Int,
+        carbsG: Int,
+        fatG: Int,
+        sodiumMg: Int,
+        sugarG: Int,
+        cholesterolMg: Int,
+        notes: String,
+        incrementUsage: Bool,
+        useCountOverride: Int? = nil,
+        lastUsedAt: String? = nil,
+        createdAt: String? = nil
+    ) {
+        guard let db = db else { return }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normKey = Self.normText(cleanName)
+        guard !cleanName.isEmpty, !normKey.isEmpty else { return }
+        let cleanSlot = defaultMealSlot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Lunch" : defaultMealSlot
+        let cleanNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = Self.nowISO()
+        let incomingLast = (lastUsedAt?.isEmpty == false) ? lastUsedAt! : now
+        let incomingCreated = (createdAt?.isEmpty == false) ? createdAt! : incomingLast
+
+        var existingId: String? = nil
+        var existingCount = 0
+        var existingLast = ""
+        var qStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT id, COALESCE(use_count, 1), last_used_at FROM saved_meals WHERE normalized_key = ? LIMIT 1", -1, &qStmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(qStmt, 1, normKey, -1, SQLITE_TRANSIENT)
+            if sqlite3_step(qStmt) == SQLITE_ROW {
+                existingId = sqlite3_column_text(qStmt, 0).map { String(cString: $0) }
+                existingCount = Int(sqlite3_column_int(qStmt, 1))
+                existingLast = sqlite3_column_text(qStmt, 2).map { String(cString: $0) } ?? ""
+            }
+        }
+        sqlite3_finalize(qStmt)
+
+        if let eid = existingId {
+            let nextCount: Int
+            if let override = useCountOverride {
+                nextCount = max(existingCount, override)
+            } else {
+                nextCount = existingCount + (incrementUsage ? 1 : 0)
+            }
+            let nextLast = max(existingLast, incomingLast)
+            var uStmt: OpaquePointer?
+            let uSql = """
+            UPDATE saved_meals
+            SET name = ?, default_meal_slot = ?, kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ?,
+                sodium_mg = ?, sugar_g = ?, cholesterol_mg = ?, notes = ?, use_count = ?, last_used_at = ?
+            WHERE id = ?
+            """
+            if sqlite3_prepare_v2(db, uSql, -1, &uStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(uStmt, 1, cleanName, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(uStmt, 2, cleanSlot, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(uStmt, 3, Int32(max(0, kcal)))
+                sqlite3_bind_int(uStmt, 4, Int32(max(0, proteinG)))
+                sqlite3_bind_int(uStmt, 5, Int32(max(0, carbsG)))
+                sqlite3_bind_int(uStmt, 6, Int32(max(0, fatG)))
+                sqlite3_bind_int(uStmt, 7, Int32(max(0, sodiumMg)))
+                sqlite3_bind_int(uStmt, 8, Int32(max(0, sugarG)))
+                sqlite3_bind_int(uStmt, 9, Int32(max(0, cholesterolMg)))
+                sqlite3_bind_text(uStmt, 10, cleanNotes, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(uStmt, 11, Int32(max(1, nextCount)))
+                sqlite3_bind_text(uStmt, 12, nextLast, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(uStmt, 13, eid, -1, SQLITE_TRANSIENT)
+                sqlite3_step(uStmt)
+            }
+            sqlite3_finalize(uStmt)
+        } else {
+            let candidateId = (id?.isEmpty == false) ? id! : "meal_\(UUID().uuidString.prefix(8).lowercased())"
+            let idConflict = scalarInt("SELECT COUNT(*) FROM saved_meals WHERE id = ?", args: [candidateId]) > 0
+            let finalId = idConflict ? "meal_\(UUID().uuidString.prefix(8).lowercased())" : candidateId
+            let finalCount = max(1, useCountOverride ?? 1)
+            var iStmt: OpaquePointer?
+            let iSql = """
+            INSERT INTO saved_meals (
+                id, name, normalized_key, default_meal_slot, kcal, protein_g, carbs_g, fat_g,
+                sodium_mg, sugar_g, cholesterol_mg, notes, use_count, last_used_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            if sqlite3_prepare_v2(db, iSql, -1, &iStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(iStmt, 1, finalId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 2, cleanName, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 3, normKey, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 4, cleanSlot, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(iStmt, 5, Int32(max(0, kcal)))
+                sqlite3_bind_int(iStmt, 6, Int32(max(0, proteinG)))
+                sqlite3_bind_int(iStmt, 7, Int32(max(0, carbsG)))
+                sqlite3_bind_int(iStmt, 8, Int32(max(0, fatG)))
+                sqlite3_bind_int(iStmt, 9, Int32(max(0, sodiumMg)))
+                sqlite3_bind_int(iStmt, 10, Int32(max(0, sugarG)))
+                sqlite3_bind_int(iStmt, 11, Int32(max(0, cholesterolMg)))
+                sqlite3_bind_text(iStmt, 12, cleanNotes, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(iStmt, 13, Int32(finalCount))
+                sqlite3_bind_text(iStmt, 14, incomingLast, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 15, incomingCreated, -1, SQLITE_TRANSIENT)
+                sqlite3_step(iStmt)
+            }
+            sqlite3_finalize(iStmt)
+        }
+    }
+
+    private func backfillSavedMealsFromHistoryOnce() {
+        if getSettingInternal("saved_meals_backfilled_v1", default: "") == "1" {
+            return
+        }
+        let history = listAllMacroLogsInternal()
+        if !history.isEmpty {
+            exec("BEGIN IMMEDIATE;")
+            backfillSavedMealsFromMacroLogsInternal(history)
+            exec("COMMIT;")
+        }
+        setSettingInternal(key: "saved_meals_backfilled_v1", value: "1")
+    }
+
+    private func backfillSavedMealsFromMacroLogsInternal(_ logs: [MacroLogEntry]) {
+        let nonRecipe = logs.filter { $0.recipeId?.isEmpty ?? true }
+        var grouped: [String: [MacroLogEntry]] = [:]
+        for entry in nonRecipe {
+            let key = Self.normText(entry.name)
+            guard !key.isEmpty else { continue }
+            grouped[key, default: []].append(entry)
+        }
+        for (_, entries) in grouped {
+            let sorted = entries.sorted { a, b in
+                if a.logDate != b.logDate { return a.logDate > b.logDate }
+                return a.id > b.id
+            }
+            guard let latest = sorted.first else { continue }
+            let oldest = sorted.last ?? latest
+            let lastStamp = latest.createdAt.isEmpty ? "\(latest.logDate)T12:00:00Z" : latest.createdAt
+            let firstStamp = oldest.createdAt.isEmpty ? lastStamp : oldest.createdAt
+            upsertSavedMealInternal(
+                name: latest.name,
+                defaultMealSlot: latest.mealSlot,
+                kcal: latest.kcal,
+                proteinG: latest.proteinG,
+                carbsG: latest.carbsG,
+                fatG: latest.fatG,
+                sodiumMg: latest.sodiumMg,
+                sugarG: latest.sugarG,
+                cholesterolMg: latest.cholesterolMg,
+                notes: latest.notes,
+                incrementUsage: false,
+                useCountOverride: sorted.count,
+                lastUsedAt: lastStamp,
+                createdAt: firstStamp
             )
         }
+    }
+
+    private static func readSavedMealRow(_ stmt: OpaquePointer) -> SavedMeal {
+        SavedMeal(
+            id: sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "",
+            name: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+            defaultMealSlot: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "Lunch",
+            kcal: Int(sqlite3_column_int(stmt, 3)),
+            proteinG: Int(sqlite3_column_int(stmt, 4)),
+            carbsG: Int(sqlite3_column_int(stmt, 5)),
+            fatG: Int(sqlite3_column_int(stmt, 6)),
+            sodiumMg: Int(sqlite3_column_int(stmt, 7)),
+            sugarG: Int(sqlite3_column_int(stmt, 8)),
+            cholesterolMg: Int(sqlite3_column_int(stmt, 9)),
+            notes: sqlite3_column_text(stmt, 10).map { String(cString: $0) } ?? "",
+            useCount: Int(sqlite3_column_int(stmt, 11)),
+            lastUsedAt: sqlite3_column_text(stmt, 12).map { String(cString: $0) } ?? "",
+            createdAt: sqlite3_column_text(stmt, 13).map { String(cString: $0) } ?? ""
+        )
     }
 
     @discardableResult
@@ -3542,6 +3966,7 @@ final class DatabaseManager: @unchecked Sendable {
         let weightList = listWeightLogs(displayUnit: unit, limit: 5000)
         let macroTargets = getMacroTargets()
         let macroLogs = listAllMacroLogs()
+        let savedMeals = listSavedMeals(limit: 5000)
         let recs = listRecipes()
         let cycleLogs = listAllCycleLogs()
         let sets = listAllWorkoutSets()
@@ -3564,7 +3989,7 @@ final class DatabaseManager: @unchecked Sendable {
         }
 
         return VeldaFullSnapshot(
-            schemaVersion: 2,
+            schemaVersion: 3,
             appName: "Velda Fitness",
             exportedAt: Self.nowISO(),
             weightUnit: unit,
@@ -3576,6 +4001,7 @@ final class DatabaseManager: @unchecked Sendable {
             weightLogs: weightList,
             macroTargets: macroTargets,
             macroLogs: macroLogs,
+            savedMeals: savedMeals,
             recipes: recs.saved + recs.discover,
             cycleLogs: cycleLogs
         )
@@ -3595,6 +4021,7 @@ final class DatabaseManager: @unchecked Sendable {
                 exec("DELETE FROM workout_sets;")
                 exec("DELETE FROM weight_logs;")
                 exec("DELETE FROM macro_logs;")
+                exec("DELETE FROM saved_meals;")
                 exec("DELETE FROM cycle_logs;")
                 exec("DELETE FROM recipes;")
                 exec("DELETE FROM exercises WHERE is_custom = 1;")
@@ -3767,6 +4194,30 @@ final class DatabaseManager: @unchecked Sendable {
                 }
             }
 
+            if !snapshot.savedMeals.isEmpty {
+                for m in snapshot.savedMeals {
+                    upsertSavedMealInternal(
+                        id: m.id,
+                        name: m.name,
+                        defaultMealSlot: m.defaultMealSlot,
+                        kcal: m.kcal,
+                        proteinG: m.proteinG,
+                        carbsG: m.carbsG,
+                        fatG: m.fatG,
+                        sodiumMg: m.sodiumMg,
+                        sugarG: m.sugarG,
+                        cholesterolMg: m.cholesterolMg,
+                        notes: m.notes,
+                        incrementUsage: false,
+                        useCountOverride: m.useCount,
+                        lastUsedAt: m.lastUsedAt,
+                        createdAt: m.createdAt
+                    )
+                }
+            } else if !snapshot.macroLogs.isEmpty {
+                backfillSavedMealsFromMacroLogsInternal(snapshot.macroLogs)
+            }
+
             for rec in snapshot.recipes {
                 let exists = scalarInt("SELECT COUNT(*) FROM recipes WHERE id = ?", args: [rec.id]) > 0
                 if !exists || !merge {
@@ -3902,6 +4353,7 @@ final class DatabaseManager: @unchecked Sendable {
             exec("DELETE FROM workout_sets;")
             exec("DELETE FROM weight_logs;")
             exec("DELETE FROM macro_logs;")
+            exec("DELETE FROM saved_meals;")
             exec("DELETE FROM cycle_logs;")
             exec("DELETE FROM recipes;")
             exec("DELETE FROM exercises WHERE is_custom = 1;")

@@ -70,6 +70,7 @@ final class LedgerStore: ObservableObject {
         entries: []
     )
     @Published var recentKcalPoints: [DailyKcalPoint] = []
+    @Published var savedMeals: [SavedMeal] = []
     @Published var isEstimatingMacros: Bool = false
     @Published var macroAIError: String? = nil
 
@@ -846,7 +847,8 @@ final class LedgerStore: ObservableObject {
         sugarG: Int = 0,
         cholesterolMg: Int = 0,
         recipeId: String? = nil,
-        notes: String = ""
+        notes: String = "",
+        saveToPrevious: Bool = true
     ) {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else {
@@ -866,12 +868,47 @@ final class LedgerStore: ObservableObject {
             sugarG: sugarG,
             cholesterolMg: cholesterolMg,
             recipeId: recipeId,
-            notes: notes
+            notes: notes,
+            saveAsReusableMeal: saveToPrevious && (recipeId?.isEmpty ?? true)
         )
         reloadMacroState()
         storage = db.getStorageMetrics()
         LedgerHaptics.heavy()
         showToast("Logged \(clean)")
+    }
+
+    func logSavedMeal(_ meal: SavedMeal, mealSlot: String? = nil, servings: Double = 1.0) {
+        let mult = max(0.25, servings)
+        let targetSlot = (mealSlot?.isEmpty == false) ? mealSlot! : meal.defaultMealSlot
+        db.addMacroLog(
+            logDate: macroDate,
+            mealSlot: targetSlot,
+            name: meal.name,
+            servings: mult,
+            kcal: Int(round(Double(meal.kcal) * mult)),
+            proteinG: Int(round(Double(meal.proteinG) * mult)),
+            carbsG: Int(round(Double(meal.carbsG) * mult)),
+            fatG: Int(round(Double(meal.fatG) * mult)),
+            sodiumMg: Int(round(Double(meal.sodiumMg) * mult)),
+            sugarG: Int(round(Double(meal.sugarG) * mult)),
+            cholesterolMg: Int(round(Double(meal.cholesterolMg) * mult)),
+            recipeId: nil,
+            notes: meal.notes,
+            saveAsReusableMeal: false
+        )
+        db.recordSavedMealUsage(id: meal.id)
+        reloadMacroState()
+        storage = db.getStorageMetrics()
+        LedgerHaptics.heavy()
+        showToast("Logged \(meal.name)")
+    }
+
+    func deleteSavedMeal(_ id: String) {
+        db.deleteSavedMeal(id: id)
+        reloadMacroState()
+        storage = db.getStorageMetrics()
+        LedgerHaptics.heavy()
+        showToast("Removed from previous meals")
     }
 
     func logRecipeToMacros(_ recipe: Recipe, servings: Double = 1.0, targetDate: String? = nil) {
@@ -937,6 +974,7 @@ final class LedgerStore: ObservableObject {
         macroTargets = db.getMacroTargets()
         dailyMacros = db.listMacroLogs(forDate: macroDate)
         recentKcalPoints = db.recentDailyKcalPoints(endingAt: macroDate, days: 7)
+        savedMeals = db.listSavedMeals(limit: 200)
     }
 
     // MARK: - Cycle Tracking Actions
@@ -1438,6 +1476,16 @@ final class LedgerStore: ObservableObject {
                 discoverRecipes = recs.discover
                 storage = db.getStorageMetrics()
                 showToast("Imported recipe: \(rec.title)")
+            case .savedMeals(let meals):
+                let count = db.importSavedMeals(meals)
+                reloadMacroState()
+                storage = db.getStorageMetrics()
+                showToast("Imported \(count) saved meal\(count == 1 ? "" : "s")")
+            case .macrosBundle(let targets, let logs, let meals):
+                db.importMacrosBundle(targets: targets, logs: logs, savedMeals: meals)
+                reloadMacroState()
+                storage = db.getStorageMetrics()
+                showToast("Imported macros & saved meals")
             }
             LedgerHaptics.heavy()
             triggerInkWrite()

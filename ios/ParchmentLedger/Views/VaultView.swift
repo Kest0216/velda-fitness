@@ -75,7 +75,7 @@ struct VaultView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removes your local workouts, routines, weight, macros, recipes, cycle logs, and saved AI credentials.")
+            Text("Removes your local workouts, routines, weight, macros, saved meals, recipes, cycle logs, and saved AI credentials.")
         }
         .alert("Final Confirmation: Erase Everything?", isPresented: $confirmWipeStep2) {
             Button("Erase All Data", role: .destructive) {
@@ -132,7 +132,7 @@ struct VaultView: View {
     private func storageMetersSection(_ st: StorageMetrics) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             storageBar(
-                label: "Personal Journal (\(st.totalSetCount) sets · \(st.macroLogCount) meals · \(st.cycleLogCount) cycle days)",
+                label: "Personal Journal (\(st.totalSetCount) sets · \(st.macroLogCount) meals · \(st.savedMealCount) saved · \(st.cycleLogCount) cycle days)",
                 valueText: formatByteCount(st.dbBytes),
                 ratio: Double(st.dbBytes) / Double(2 * 1024 * 1024),
                 minRatio: 0.04

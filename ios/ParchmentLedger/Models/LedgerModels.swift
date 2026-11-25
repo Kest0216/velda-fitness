@@ -710,6 +710,79 @@ struct EstimatedMealMacros: Codable, Equatable {
     let notes: String
 }
 
+struct SavedMeal: Identifiable, Codable, Equatable {
+    let id: String
+    var name: String
+    var defaultMealSlot: String
+    var kcal: Int
+    var proteinG: Int
+    var carbsG: Int
+    var fatG: Int
+    var sodiumMg: Int
+    var sugarG: Int
+    var cholesterolMg: Int
+    var notes: String
+    var useCount: Int
+    var lastUsedAt: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, defaultMealSlot, kcal, proteinG, carbsG, fatG
+        case sodiumMg, sugarG, cholesterolMg, notes, useCount, lastUsedAt, createdAt
+    }
+
+    init(
+        id: String,
+        name: String,
+        defaultMealSlot: String = "Lunch",
+        kcal: Int,
+        proteinG: Int,
+        carbsG: Int,
+        fatG: Int,
+        sodiumMg: Int = 0,
+        sugarG: Int = 0,
+        cholesterolMg: Int = 0,
+        notes: String = "",
+        useCount: Int = 1,
+        lastUsedAt: String,
+        createdAt: String
+    ) {
+        self.id = id
+        self.name = name
+        self.defaultMealSlot = defaultMealSlot
+        self.kcal = kcal
+        self.proteinG = proteinG
+        self.carbsG = carbsG
+        self.fatG = fatG
+        self.sodiumMg = sodiumMg
+        self.sugarG = sugarG
+        self.cholesterolMg = cholesterolMg
+        self.notes = notes
+        self.useCount = max(1, useCount)
+        self.lastUsedAt = lastUsedAt
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? "meal_\(UUID().uuidString.prefix(8).lowercased())"
+        name = try c.decode(String.self, forKey: .name)
+        defaultMealSlot = try c.decodeIfPresent(String.self, forKey: .defaultMealSlot) ?? "Lunch"
+        kcal = try c.decodeIfPresent(Int.self, forKey: .kcal) ?? 0
+        proteinG = try c.decodeIfPresent(Int.self, forKey: .proteinG) ?? 0
+        carbsG = try c.decodeIfPresent(Int.self, forKey: .carbsG) ?? 0
+        fatG = try c.decodeIfPresent(Int.self, forKey: .fatG) ?? 0
+        sodiumMg = try c.decodeIfPresent(Int.self, forKey: .sodiumMg) ?? 0
+        sugarG = try c.decodeIfPresent(Int.self, forKey: .sugarG) ?? 0
+        cholesterolMg = try c.decodeIfPresent(Int.self, forKey: .cholesterolMg) ?? 0
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        useCount = max(1, try c.decodeIfPresent(Int.self, forKey: .useCount) ?? 1)
+        let now = DatabaseManager.nowISO()
+        lastUsedAt = try c.decodeIfPresent(String.self, forKey: .lastUsedAt) ?? now
+        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt) ?? lastUsedAt
+    }
+}
+
 // MARK: - Cycle / Menstrual Models
 
 enum CyclePhase: String, CaseIterable, Equatable {
@@ -950,6 +1023,7 @@ enum ExportDomain: String, CaseIterable, Identifiable {
     case customExercises
     case bodyWeight
     case macros
+    case savedMeals
     case recipes
     case cycle
 
@@ -963,6 +1037,7 @@ enum ExportDomain: String, CaseIterable, Identifiable {
         case .customExercises: return "Custom Exercises"
         case .bodyWeight: return "Body Weight"
         case .macros: return "Diet & Macros"
+        case .savedMeals: return "Saved Meals"
         case .recipes: return "Recipes"
         case .cycle: return "Cycle Log"
         }
@@ -1031,8 +1106,129 @@ struct VeldaFullSnapshot: Codable, Equatable {
     let weightLogs: [WeightLogEntry]
     let macroTargets: MacroTargets
     let macroLogs: [MacroLogEntry]
+    let savedMeals: [SavedMeal]
     let recipes: [Recipe]
     let cycleLogs: [CycleLogEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, appName, exportedAt, weightUnit, cycleTrackingEnabled
+        case customExercises, routines, dateSchedules, workoutSets, weightLogs
+        case macroTargets, macroLogs, savedMeals, recipes, cycleLogs
+    }
+
+    init(
+        schemaVersion: Int,
+        appName: String,
+        exportedAt: String,
+        weightUnit: String,
+        cycleTrackingEnabled: Bool,
+        customExercises: [Exercise],
+        routines: [RoutineSummary],
+        dateSchedules: [ExportDateScheduleEntry],
+        workoutSets: [ExportWorkoutSet],
+        weightLogs: [WeightLogEntry],
+        macroTargets: MacroTargets,
+        macroLogs: [MacroLogEntry],
+        savedMeals: [SavedMeal] = [],
+        recipes: [Recipe],
+        cycleLogs: [CycleLogEntry]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.appName = appName
+        self.exportedAt = exportedAt
+        self.weightUnit = weightUnit
+        self.cycleTrackingEnabled = cycleTrackingEnabled
+        self.customExercises = customExercises
+        self.routines = routines
+        self.dateSchedules = dateSchedules
+        self.workoutSets = workoutSets
+        self.weightLogs = weightLogs
+        self.macroTargets = macroTargets
+        self.macroLogs = macroLogs
+        self.savedMeals = savedMeals
+        self.recipes = recipes
+        self.cycleLogs = cycleLogs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        appName = try c.decode(String.self, forKey: .appName)
+        exportedAt = try c.decode(String.self, forKey: .exportedAt)
+        weightUnit = try c.decode(String.self, forKey: .weightUnit)
+        cycleTrackingEnabled = try c.decode(Bool.self, forKey: .cycleTrackingEnabled)
+        customExercises = try c.decode([Exercise].self, forKey: .customExercises)
+        routines = try c.decode([RoutineSummary].self, forKey: .routines)
+        dateSchedules = try c.decode([ExportDateScheduleEntry].self, forKey: .dateSchedules)
+        workoutSets = try c.decode([ExportWorkoutSet].self, forKey: .workoutSets)
+        weightLogs = try c.decode([WeightLogEntry].self, forKey: .weightLogs)
+        macroTargets = try c.decode(MacroTargets.self, forKey: .macroTargets)
+        macroLogs = try c.decode([MacroLogEntry].self, forKey: .macroLogs)
+        savedMeals = try c.decodeIfPresent([SavedMeal].self, forKey: .savedMeals) ?? []
+        recipes = try c.decode([Recipe].self, forKey: .recipes)
+        cycleLogs = try c.decode([CycleLogEntry].self, forKey: .cycleLogs)
+    }
+}
+
+struct VeldaSavedMealsExportPayload: Codable {
+    let schemaVersion: Int
+    let domain: String
+    let exportedAt: String
+    let savedMeals: [SavedMeal]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, domain, exportedAt, savedMeals
+    }
+
+    init(schemaVersion: Int = 1, domain: String = "saved_meals", exportedAt: String, savedMeals: [SavedMeal]) {
+        self.schemaVersion = schemaVersion
+        self.domain = domain
+        self.exportedAt = exportedAt
+        self.savedMeals = savedMeals
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        domain = try c.decodeIfPresent(String.self, forKey: .domain) ?? "saved_meals"
+        exportedAt = try c.decodeIfPresent(String.self, forKey: .exportedAt) ?? ""
+        savedMeals = try c.decode([SavedMeal].self, forKey: .savedMeals)
+    }
+}
+
+struct VeldaMacrosExportPayload: Codable {
+    let domain: String
+    let exportedAt: String
+    let macroTargets: MacroTargets?
+    let macroLogs: [MacroLogEntry]
+    let savedMeals: [SavedMeal]
+
+    enum CodingKeys: String, CodingKey {
+        case domain, exportedAt, macroTargets, macroLogs, savedMeals
+    }
+
+    init(
+        domain: String = "macros",
+        exportedAt: String,
+        macroTargets: MacroTargets?,
+        macroLogs: [MacroLogEntry],
+        savedMeals: [SavedMeal] = []
+    ) {
+        self.domain = domain
+        self.exportedAt = exportedAt
+        self.macroTargets = macroTargets
+        self.macroLogs = macroLogs
+        self.savedMeals = savedMeals
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        domain = try c.decodeIfPresent(String.self, forKey: .domain) ?? "macros"
+        exportedAt = try c.decodeIfPresent(String.self, forKey: .exportedAt) ?? ""
+        macroTargets = try c.decodeIfPresent(MacroTargets.self, forKey: .macroTargets)
+        macroLogs = try c.decode([MacroLogEntry].self, forKey: .macroLogs)
+        savedMeals = try c.decodeIfPresent([SavedMeal].self, forKey: .savedMeals) ?? []
+    }
 }
 
 struct VeldaRecipeSharePayload: Codable {
@@ -1065,6 +1261,7 @@ struct StorageMetrics: Equatable {
     let customExerciseCount: Int
     let totalSetCount: Int
     let macroLogCount: Int
+    var savedMealCount: Int = 0
     let cycleLogCount: Int
     let hasAPIKey: Bool
     let maskedAPIKey: String
