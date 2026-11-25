@@ -29,6 +29,7 @@ final class LedgerStore: ObservableObject {
     @Published var routines: [RoutineSummary] = []
     @Published var workout: DayWorkout?
     @Published var editRoutineMode: Bool = false
+    @Published var editingRoutineId: String? = nil
     @Published var showMonthlyCalendar: Bool = false
     @Published var showRoutineManager: Bool = false
     @Published var routineManagerStartInCreate: Bool = false
@@ -38,8 +39,12 @@ final class LedgerStore: ObservableObject {
     @Published var openTrendIds: Set<String> = []
     @Published var expandedExerciseIds: Set<String> = []
     @Published var pickerQuery: String = ""
+    @Published var pickerMuscleRegion: MuscleRegion = .all
+    @Published var pickerMuscleSubGroup: MuscleSubGroup? = nil
     @Published var pickerResults: [Exercise] = []
     @Published var pickerOpen: Bool = false
+    @Published var pickerTargetRoutineId: String? = nil
+    @Published var customQuickMuscleGroup: MuscleSubGroup = .custom
     @Published var customLinkedVideoFilename: String = ""
     @Published var customExercises: [Exercise] = []
 
@@ -65,6 +70,7 @@ final class LedgerStore: ObservableObject {
         entries: []
     )
     @Published var recentKcalPoints: [DailyKcalPoint] = []
+    @Published var savedMeals: [SavedMeal] = []
     @Published var isEstimatingMacros: Bool = false
     @Published var macroAIError: String? = nil
 
@@ -221,7 +227,11 @@ final class LedgerStore: ObservableObject {
         expandedExerciseIds.removeAll()
         showInlineRoutinePicker = false
         pickerOpen = false
+        pickerTargetRoutineId = nil
+        pickerMuscleRegion = .all
+        pickerMuscleSubGroup = nil
         editRoutineMode = false
+        editingRoutineId = nil
         reloadWorkoutState()
         reloadMacroState()
         triggerInkWrite()
@@ -295,52 +305,68 @@ final class LedgerStore: ObservableObject {
         showToast("Weight entry removed")
     }
 
+    func saveRoutineDetails(routineId: String, title: String, emblem: String) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            showToast("Enter a routine title")
+            return
+        }
+        db.updateRoutineDetails(routineId: routineId, title: clean, emblem: emblem)
+        LedgerHaptics.medium()
+        reloadWorkoutState()
+        editRoutineMode = false
+        editingRoutineId = nil
+        showToast("Routine updated")
+    }
+
     func saveRoutineTitle(_ newTitle: String) {
         let clean = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        if let rid = workout?.routineId {
+        if let rid = editingRoutineId ?? workout?.routineId {
             db.updateRoutineTitle(routineId: rid, title: clean)
             LedgerHaptics.medium()
         } else {
-            _ = db.createRoutine(title: clean, exerciseIds: [], assignWeekdays: [], assignDate: selectedDate)
+            _ = db.createRoutine(title: clean, emblem: "", exerciseIds: [], assignWeekdays: [], assignDate: selectedDate)
             LedgerHaptics.heavy()
         }
         reloadWorkoutState()
         editRoutineMode = false
+        editingRoutineId = nil
         showToast("Routine title saved")
     }
 
-    func toggleVideo(_ exerciseId: String) {
+    func toggleVideo(_ key: String) {
         LedgerHaptics.light()
-        if openVideoIds.contains(exerciseId) {
-            openVideoIds.remove(exerciseId)
+        if openVideoIds.contains(key) {
+            openVideoIds.remove(key)
         } else {
-            openVideoIds.insert(exerciseId)
+            openVideoIds.insert(key)
         }
     }
 
-    func toggleTrend(_ exerciseId: String) {
+    func toggleTrend(_ key: String) {
         LedgerHaptics.light()
-        if openTrendIds.contains(exerciseId) {
-            openTrendIds.remove(exerciseId)
+        if openTrendIds.contains(key) {
+            openTrendIds.remove(key)
         } else {
-            openTrendIds.insert(exerciseId)
+            openTrendIds.insert(key)
         }
     }
 
-    func toggleExerciseExpanded(_ exerciseId: String) {
+    func toggleExerciseExpanded(_ key: String) {
         LedgerHaptics.light()
         withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
-            if expandedExerciseIds.contains(exerciseId) {
-                expandedExerciseIds.remove(exerciseId)
-                openVideoIds.remove(exerciseId)
+            if expandedExerciseIds.contains(key) {
+                expandedExerciseIds.remove(key)
+                openVideoIds.remove(key)
             } else {
-                expandedExerciseIds.insert(exerciseId)
+                expandedExerciseIds.insert(key)
             }
         }
     }
 
-    func completeAndMinimizeExercise(_ ex: RoutineExerciseItem) {
+    func completeAndMinimizeExercise(_ ex: RoutineExerciseItem, key: String? = nil) {
+        let expandKey = key ?? ex.id
         if ex.sets.isEmpty {
             db.upsertWorkoutSet(
                 id: nil,
@@ -365,6 +391,8 @@ final class LedgerStore: ObservableObject {
         reloadWorkoutState()
         LedgerHaptics.heavy()
         withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+            expandedExerciseIds.remove(expandKey)
+            openVideoIds.remove(expandKey)
             expandedExerciseIds.remove(ex.id)
             openVideoIds.remove(ex.id)
         }
@@ -407,36 +435,72 @@ final class LedgerStore: ObservableObject {
         LedgerHaptics.heavy()
     }
 
-    func searchExercises(_ query: String) {
-        pickerQuery = query
+    func openExercisePicker(for routineId: String) {
+        LedgerHaptics.light()
+        showInlineRoutinePicker = false
+        pickerTargetRoutineId = routineId
         pickerOpen = true
-        pickerResults = db.fuzzySearchExercises(query: query, limit: 25)
+        refreshPickerResults()
     }
 
-    func addExerciseToCurrentDay(_ exerciseId: String) {
-        if let rid = workout?.routineId {
+    func closeExercisePicker() {
+        pickerOpen = false
+        pickerTargetRoutineId = nil
+        pickerQuery = ""
+        pickerMuscleRegion = .all
+        pickerMuscleSubGroup = nil
+        customLinkedVideoFilename = ""
+    }
+
+    func searchExercises(_ query: String, region: MuscleRegion? = nil, subGroup: MuscleSubGroup?? = nil) {
+        pickerQuery = query
+        if let region {
+            pickerMuscleRegion = region
+        }
+        if let subGroup {
+            pickerMuscleSubGroup = subGroup
+        }
+        pickerOpen = true
+        refreshPickerResults()
+    }
+
+    func refreshPickerResults() {
+        let hasActiveFilter = pickerMuscleRegion != .all || pickerMuscleSubGroup != nil
+        let limit = (hasActiveFilter || !pickerQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ? 80 : 25
+        pickerResults = db.fuzzySearchExercises(
+            query: pickerQuery,
+            region: pickerMuscleRegion,
+            subGroup: pickerMuscleSubGroup,
+            limit: limit
+        )
+    }
+
+    func addExerciseToCurrentDay(_ exerciseId: String, routineId: String? = nil) {
+        let targetRid = routineId ?? pickerTargetRoutineId ?? workout?.routineId
+        if let rid = targetRid {
             db.addExerciseToRoutine(routineId: rid, exerciseId: exerciseId)
+            expandedExerciseIds.insert("\(rid)_\(exerciseId)")
         } else {
             let dayFull = workout?.dayFullName ?? "Custom"
-            _ = db.createRoutine(
+            let createdRid = db.createRoutine(
                 title: "\(dayFull) Routine",
+                emblem: "",
                 exerciseIds: [exerciseId],
                 assignWeekdays: [],
                 assignDate: selectedDate
             )
+            expandedExerciseIds.insert("\(createdRid)_\(exerciseId)")
         }
-        expandedExerciseIds.insert(exerciseId)
-        pickerQuery = ""
-        pickerOpen = false
-        customLinkedVideoFilename = ""
+        closeExercisePicker()
         reloadWorkoutState()
         LedgerHaptics.heavy()
         showToast("Added to routine")
     }
 
-    func removeExerciseFromCurrentDay(_ exerciseId: String) {
-        guard let rid = workout?.routineId else { return }
-        db.removeExerciseFromRoutine(routineId: rid, exerciseId: exerciseId)
+    func removeExercise(_ exerciseId: String, fromRoutine routineId: String) {
+        db.removeExerciseFromRoutine(routineId: routineId, exerciseId: exerciseId)
+        expandedExerciseIds.remove("\(routineId)_\(exerciseId)")
+        openVideoIds.remove("\(routineId)_\(exerciseId)")
         expandedExerciseIds.remove(exerciseId)
         openVideoIds.remove(exerciseId)
         reloadWorkoutState()
@@ -444,42 +508,51 @@ final class LedgerStore: ObservableObject {
         showToast("Removed from routine")
     }
 
-    func createCustomExercise() {
+    func removeExerciseFromCurrentDay(_ exerciseId: String) {
+        guard let rid = workout?.routineId else { return }
+        removeExercise(exerciseId, fromRoutine: rid)
+    }
+
+    func createCustomExercise(muscleHint: String? = nil) {
         let clean = pickerQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        let existingRid = workout?.routineId
+        let existingRid = pickerTargetRoutineId ?? workout?.routineId
+        let chosenHint = (muscleHint?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? muscleHint!
+            : customQuickMuscleGroup.rawValue
         let created = db.createCustomExercise(
             name: clean,
-            muscleHint: "Custom",
+            muscleHint: chosenHint,
             trackingType: "weighted",
             equipment: "",
             notes: "",
             videoFilename: customLinkedVideoFilename.isEmpty ? nil : customLinkedVideoFilename,
             routineId: existingRid
         )
-        if existingRid == nil {
+        if let rid = existingRid {
+            expandedExerciseIds.insert("\(rid)_\(created.id)")
+        } else {
             let dayFull = workout?.dayFullName ?? "Custom"
-            _ = db.createRoutine(
+            let newRid = db.createRoutine(
                 title: "\(dayFull) Routine",
+                emblem: "",
                 exerciseIds: [created.id],
                 assignWeekdays: [],
                 assignDate: selectedDate
             )
+            expandedExerciseIds.insert("\(newRid)_\(created.id)")
         }
-        expandedExerciseIds.insert(created.id)
-        pickerQuery = ""
-        pickerOpen = false
-        customLinkedVideoFilename = ""
+        closeExercisePicker()
         pickerResults = db.fuzzySearchExercises(query: "", limit: 25)
         reloadWorkoutState()
         LedgerHaptics.heavy()
         showToast("Added custom: \(clean)")
     }
 
-    func createCustomExerciseOnly(name: String, videoFilename: String?) -> Exercise {
+    func createCustomExerciseOnly(name: String, muscleHint: String = "Custom", videoFilename: String?) -> Exercise {
         let ex = db.createCustomExercise(
             name: name,
-            muscleHint: "Custom",
+            muscleHint: muscleHint,
             trackingType: "weighted",
             equipment: "",
             notes: "",
@@ -487,7 +560,7 @@ final class LedgerStore: ObservableObject {
             routineId: nil
         )
         customExercises = db.listCustomExercises()
-        pickerResults = db.fuzzySearchExercises(query: "", limit: 25)
+        pickerResults = db.fuzzySearchExercises(query: pickerQuery, region: pickerMuscleRegion, subGroup: pickerMuscleSubGroup, limit: 25)
         storage = db.getStorageMetrics()
         LedgerHaptics.heavy()
         return ex
@@ -561,9 +634,10 @@ final class LedgerStore: ObservableObject {
         showToast("Custom exercise deleted")
     }
 
-    func createRoutine(title: String, exerciseIds: [String], weekdays: [Int], assignSelectedDate: Bool) {
+    func createRoutine(title: String, emblem: String = "", exerciseIds: [String], weekdays: [Int], assignSelectedDate: Bool) {
         _ = db.createRoutine(
             title: title,
+            emblem: emblem,
             exerciseIds: exerciseIds,
             assignWeekdays: weekdays,
             assignDate: assignSelectedDate ? selectedDate : nil
@@ -576,6 +650,7 @@ final class LedgerStore: ObservableObject {
 
     func generateRoutineForMe(
         prompt: String,
+        emblem: String = "",
         weekdays: [Int],
         assignSelectedDate: Bool,
         includeCustomExercises: Bool = true
@@ -597,6 +672,7 @@ final class LedgerStore: ObservableObject {
             )
             _ = db.createRoutine(
                 title: plan.title,
+                emblem: emblem,
                 exerciseIds: plan.exercises.map(\.id),
                 assignWeekdays: weekdays,
                 assignDate: assignSelectedDate ? selectedDate : nil
@@ -614,8 +690,8 @@ final class LedgerStore: ObservableObject {
         }
     }
 
-    func updateRoutine(id: String, title: String, exerciseIds: [String], weekdays: [Int]) {
-        db.updateRoutine(id: id, title: title, exerciseIds: exerciseIds, assignWeekdays: weekdays)
+    func updateRoutine(id: String, title: String, emblem: String = "", exerciseIds: [String], weekdays: [Int]) {
+        db.updateRoutine(id: id, title: title, emblem: emblem, exerciseIds: exerciseIds, assignWeekdays: weekdays)
         reloadWorkoutState()
         LedgerHaptics.medium()
         triggerInkWrite()
@@ -628,6 +704,10 @@ final class LedgerStore: ObservableObject {
         openVideoIds.removeAll()
         openTrendIds.removeAll()
         editRoutineMode = false
+        editingRoutineId = nil
+        if pickerTargetRoutineId == id {
+            closeExercisePicker()
+        }
         reloadWorkoutState()
         LedgerHaptics.heavy()
         triggerInkWrite()
@@ -640,7 +720,9 @@ final class LedgerStore: ObservableObject {
         openVideoIds.removeAll()
         openTrendIds.removeAll()
         editRoutineMode = false
+        editingRoutineId = nil
         showInlineRoutinePicker = false
+        closeExercisePicker()
         reloadWorkoutState()
         LedgerHaptics.heavy()
         triggerInkWrite()
@@ -661,11 +743,39 @@ final class LedgerStore: ObservableObject {
         } else {
             db.assignRoutineToWeekday(routineId: routineId, dayOfWeek: selectedDow, clearOverrideForDate: selectedDate)
         }
-        showInlineRoutinePicker = false
         expandedExerciseIds.removeAll()
         reloadWorkoutState()
         triggerInkWrite()
-        showToast(toSelectedDateOnly ? "Assigned to \(DatabaseManager.shortDateLabel(selectedDate))" : "Assigned to weekly schedule")
+        showToast(toSelectedDateOnly ? "Added to \(DatabaseManager.shortDateLabel(selectedDate))" : "Added to weekly schedule")
+    }
+
+    func unassignRoutine(_ routineId: String, fromSelectedDateOnly: Bool) {
+        LedgerHaptics.heavy()
+        if fromSelectedDateOnly {
+            db.removeRoutineFromDate(routineId: routineId, sessionDate: selectedDate)
+        } else {
+            db.removeRoutineFromWeekday(routineId: routineId, dayOfWeek: selectedDow, clearOverrideForDate: selectedDate)
+        }
+        if editingRoutineId == routineId {
+            editingRoutineId = nil
+            editRoutineMode = false
+        }
+        if pickerTargetRoutineId == routineId {
+            closeExercisePicker()
+        }
+        expandedExerciseIds.removeAll()
+        openVideoIds.removeAll()
+        reloadWorkoutState()
+        triggerInkWrite()
+        showToast(fromSelectedDateOnly ? "Removed from \(DatabaseManager.shortDateLabel(selectedDate))" : "Removed from weekly schedule")
+    }
+
+    func toggleRoutineOnSelectedDate(_ routineId: String) {
+        if workout?.routineIds.contains(routineId) == true {
+            unassignRoutine(routineId, fromSelectedDateOnly: true)
+        } else {
+            assignRoutine(routineId, toSelectedDateOnly: true)
+        }
     }
 
     func removeRoutineFromSelectedDateOnly() {
@@ -673,6 +783,8 @@ final class LedgerStore: ObservableObject {
         expandedExerciseIds.removeAll()
         openVideoIds.removeAll()
         editRoutineMode = false
+        editingRoutineId = nil
+        closeExercisePicker()
         reloadWorkoutState()
         LedgerHaptics.heavy()
         triggerInkWrite()
@@ -684,6 +796,8 @@ final class LedgerStore: ObservableObject {
         expandedExerciseIds.removeAll()
         openVideoIds.removeAll()
         editRoutineMode = false
+        editingRoutineId = nil
+        closeExercisePicker()
         reloadWorkoutState()
         LedgerHaptics.heavy()
         triggerInkWrite()
@@ -733,7 +847,8 @@ final class LedgerStore: ObservableObject {
         sugarG: Int = 0,
         cholesterolMg: Int = 0,
         recipeId: String? = nil,
-        notes: String = ""
+        notes: String = "",
+        saveToPrevious: Bool = true
     ) {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else {
@@ -753,12 +868,47 @@ final class LedgerStore: ObservableObject {
             sugarG: sugarG,
             cholesterolMg: cholesterolMg,
             recipeId: recipeId,
-            notes: notes
+            notes: notes,
+            saveAsReusableMeal: saveToPrevious && (recipeId?.isEmpty ?? true)
         )
         reloadMacroState()
         storage = db.getStorageMetrics()
         LedgerHaptics.heavy()
         showToast("Logged \(clean)")
+    }
+
+    func logSavedMeal(_ meal: SavedMeal, mealSlot: String? = nil, servings: Double = 1.0) {
+        let mult = max(0.25, servings)
+        let targetSlot = (mealSlot?.isEmpty == false) ? mealSlot! : meal.defaultMealSlot
+        db.addMacroLog(
+            logDate: macroDate,
+            mealSlot: targetSlot,
+            name: meal.name,
+            servings: mult,
+            kcal: Int(round(Double(meal.kcal) * mult)),
+            proteinG: Int(round(Double(meal.proteinG) * mult)),
+            carbsG: Int(round(Double(meal.carbsG) * mult)),
+            fatG: Int(round(Double(meal.fatG) * mult)),
+            sodiumMg: Int(round(Double(meal.sodiumMg) * mult)),
+            sugarG: Int(round(Double(meal.sugarG) * mult)),
+            cholesterolMg: Int(round(Double(meal.cholesterolMg) * mult)),
+            recipeId: nil,
+            notes: meal.notes,
+            saveAsReusableMeal: false
+        )
+        db.recordSavedMealUsage(id: meal.id)
+        reloadMacroState()
+        storage = db.getStorageMetrics()
+        LedgerHaptics.heavy()
+        showToast("Logged \(meal.name)")
+    }
+
+    func deleteSavedMeal(_ id: String) {
+        db.deleteSavedMeal(id: id)
+        reloadMacroState()
+        storage = db.getStorageMetrics()
+        LedgerHaptics.heavy()
+        showToast("Removed from previous meals")
     }
 
     func logRecipeToMacros(_ recipe: Recipe, servings: Double = 1.0, targetDate: String? = nil) {
@@ -824,6 +974,7 @@ final class LedgerStore: ObservableObject {
         macroTargets = db.getMacroTargets()
         dailyMacros = db.listMacroLogs(forDate: macroDate)
         recentKcalPoints = db.recentDailyKcalPoints(endingAt: macroDate, days: 7)
+        savedMeals = db.listSavedMeals(limit: 200)
     }
 
     // MARK: - Cycle Tracking Actions
@@ -1325,6 +1476,16 @@ final class LedgerStore: ObservableObject {
                 discoverRecipes = recs.discover
                 storage = db.getStorageMetrics()
                 showToast("Imported recipe: \(rec.title)")
+            case .savedMeals(let meals):
+                let count = db.importSavedMeals(meals)
+                reloadMacroState()
+                storage = db.getStorageMetrics()
+                showToast("Imported \(count) saved meal\(count == 1 ? "" : "s")")
+            case .macrosBundle(let targets, let logs, let meals):
+                db.importMacrosBundle(targets: targets, logs: logs, savedMeals: meals)
+                reloadMacroState()
+                storage = db.getStorageMetrics()
+                showToast("Imported macros & saved meals")
             }
             LedgerHaptics.heavy()
             triggerInkWrite()

@@ -10,7 +10,8 @@ import SwiftUI
 struct WorkoutsView: View {
     @EnvironmentObject var store: LedgerStore
     @State private var routineTitleDraft: String = ""
-    @State private var removeDialogPresented: Bool = false
+    @State private var routineEmblemDraft: String = ""
+    @State private var removeTargetRoutine: DayRoutineSection? = nil
     @State private var assignToDateOnly: Bool = false
     @State private var pendingConfirm: PendingActionConfirmation? = nil
     @FocusState private var pickerFocused: Bool
@@ -32,24 +33,22 @@ struct WorkoutsView: View {
 
                 if let wk = store.workout {
                     VStack(alignment: .leading, spacing: 12) {
-                        routineHeader(wk)
+                        dayScheduleBar(wk)
                             .inkWritten(index: 1, epoch: store.inkWriteEpoch)
 
                         if store.showInlineRoutinePicker {
                             inlineRoutinePickerPanel(wk)
                         }
 
-                        if store.pickerOpen {
-                            inlineExercisePicker()
+                        if !wk.hasRoutines {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.58))
+                                .frame(height: 1.2)
+                                .inkWritten(index: 2, epoch: store.inkWriteEpoch)
                         }
-
-                        Rectangle()
-                            .fill(Color.white.opacity(0.58))
-                            .frame(height: 1.2)
-                            .inkWritten(index: 2, epoch: store.inkWriteEpoch)
                     }
 
-                    if wk.routineId == nil {
+                    if !wk.hasRoutines {
                         VStack(spacing: 6) {
                             Text("Rest & Unassigned Day")
                                 .font(LedgerFont.serifLg(italic: true))
@@ -62,24 +61,42 @@ struct WorkoutsView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 28)
                         .inkWritten(index: 3, epoch: store.inkWriteEpoch)
-                    } else if wk.exercises.isEmpty {
-                        VStack(spacing: 6) {
-                            Text("No Movements in Routine")
-                                .font(LedgerFont.serifLg(italic: true))
-                                .foregroundStyle(LedgerColor.inkPrimary)
-                            Text("TAP + ADD ABOVE TO ADD EXERCISES")
-                                .font(LedgerFont.sansSm())
-                                .tracking(1.0)
-                                .foregroundStyle(LedgerColor.inkSecondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 28)
-                        .inkWritten(index: 3, epoch: store.inkWriteEpoch)
                     } else {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(Array(wk.exercises.enumerated()), id: \.element.id) { idx, ex in
-                                exerciseBlock(ex)
-                                    .inkWritten(index: idx + 3, epoch: store.inkWriteEpoch)
+                        VStack(alignment: .leading, spacing: 18) {
+                            ForEach(Array(wk.routines.enumerated()), id: \.element.id) { sectionIdx, section in
+                                VStack(alignment: .leading, spacing: 12) {
+                                    routineSectionHeader(section, in: wk)
+                                        .inkWritten(index: sectionIdx + 2, epoch: store.inkWriteEpoch)
+
+                                    if store.pickerOpen && store.pickerTargetRoutineId == section.id {
+                                        inlineExercisePicker(for: section)
+                                    }
+
+                                    Rectangle()
+                                        .fill(Color.white.opacity(0.58))
+                                        .frame(height: 1.2)
+
+                                    if section.exercises.isEmpty {
+                                        VStack(spacing: 6) {
+                                            Text("No Movements in Routine")
+                                                .font(LedgerFont.serifLg(italic: true))
+                                                .foregroundStyle(LedgerColor.inkPrimary)
+                                            Text("TAP + ADD ABOVE TO ADD EXERCISES")
+                                                .font(LedgerFont.sansSm())
+                                                .tracking(1.0)
+                                                .foregroundStyle(LedgerColor.inkSecondary)
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 20)
+                                    } else {
+                                        VStack(alignment: .leading, spacing: 12) {
+                                            ForEach(Array(section.exercises.enumerated()), id: \.element.id) { idx, ex in
+                                                exerciseBlock(ex, routineId: section.id)
+                                                    .inkWritten(index: idx + 3, epoch: store.inkWriteEpoch)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -91,19 +108,26 @@ struct WorkoutsView: View {
         .scrollDismissesKeyboard(.interactively)
         .actionConfirmationAlert($pendingConfirm)
         .confirmationDialog(
-            "Remove \(store.workout?.title ?? "Routine")?",
-            isPresented: $removeDialogPresented,
+            "Remove \(removeTargetRoutine?.title ?? "Routine")?",
+            isPresented: Binding(
+                get: { removeTargetRoutine != nil },
+                set: { if !$0 { removeTargetRoutine = nil } }
+            ),
             titleVisibility: .visible
         ) {
-            if let wk = store.workout {
+            if let wk = store.workout, let target = removeTargetRoutine {
                 Button("Remove from \(wk.displayDateShort) Only", role: .destructive) {
-                    store.removeRoutineFromSelectedDateOnly()
+                    store.unassignRoutine(target.id, fromSelectedDateOnly: true)
+                    removeTargetRoutine = nil
                 }
                 Button("Remove from Every \(wk.dayFullName)", role: .destructive) {
-                    store.removeRoutineFromWeeklyDay()
+                    store.unassignRoutine(target.id, fromSelectedDateOnly: false)
+                    removeTargetRoutine = nil
                 }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                removeTargetRoutine = nil
+            }
         }
     }
 
@@ -149,11 +173,11 @@ struct WorkoutsView: View {
                                     .monospacedDigit()
                                     .foregroundStyle(isSelected || slot.isToday ? LedgerColor.inkPrimary : LedgerColor.inkSecondary)
 
-                                Circle()
-                                    .fill(LedgerColor.inkPrimary.opacity(
-                                        slot.hasLoggedSets ? 0.95 : (slot.hasRoutine ? 0.38 : 0.0)
-                                    ))
-                                    .frame(width: 3.5, height: 3.5)
+                                CalendarEmblemStripView(
+                                    markers: slot.routineMarkers,
+                                    hasLoggedSets: slot.hasLoggedSets,
+                                    compact: true
+                                )
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 5)
@@ -180,6 +204,25 @@ struct WorkoutsView: View {
                     }
                 }
             }
+
+            let emblemRoutines = store.routines.filter { !$0.emblem.isEmpty }
+            if !emblemRoutines.isEmpty {
+                Rectangle()
+                    .fill(Color.white.opacity(0.45))
+                    .frame(height: 1)
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 6)], alignment: .leading, spacing: 4) {
+                    ForEach(emblemRoutines) { rt in
+                        HStack(spacing: 5) {
+                            RoutineEmblemBadgeView(emblem: rt.emblem, fontSize: 11)
+                            Text(rt.title)
+                                .font(LedgerFont.sansSm())
+                                .foregroundStyle(LedgerColor.inkSecondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
         }
         .softPanel()
     }
@@ -202,10 +245,12 @@ struct WorkoutsView: View {
                             .monospacedDigit()
                             .foregroundStyle(isSelected || slot.isToday ? LedgerColor.inkPrimary : LedgerColor.inkSecondary.opacity(0.85))
 
-                        Circle()
-                            .fill(LedgerColor.inkPrimary.opacity(slot.hasLoggedSets ? 1.0 : (slot.hasRoutine ? 0.42 : 0.14)))
-                            .frame(width: 4, height: 4)
-                            .padding(.top, 1)
+                        CalendarEmblemStripView(
+                            markers: slot.routineMarkers,
+                            hasLoggedSets: slot.hasLoggedSets,
+                            compact: false
+                        )
+                        .padding(.top, 1)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 5)
@@ -233,19 +278,35 @@ struct WorkoutsView: View {
         }
     }
 
-    private func routineHeader(_ wk: DayWorkout) -> some View {
-        let countLabel = wk.routineId == nil ? "REST" : "\(wk.completedExercises)/\(wk.totalExercises) DONE"
+    private func dayScheduleBar(_ wk: DayWorkout) -> some View {
+        let countLabel = !wk.hasRoutines ? "REST" : "\(wk.completedExercises)/\(wk.totalExercises) DONE"
+        let prefix = wk.routines.count > 1 ? "SCHEDULED ROUTINES (\(wk.routines.count))" : "SCHEDULED ROUTINE"
         let overline = wk.isToday
-            ? "SCHEDULED ROUTINE · \(countLabel)"
-            : "SCHEDULED ROUTINE · \(wk.dayName.uppercased()) \(wk.displayDateShort.uppercased()) · \(countLabel)"
+            ? "\(prefix) · \(countLabel)"
+            : "\(prefix) · \(wk.dayName.uppercased()) \(wk.displayDateShort.uppercased()) · \(countLabel)"
 
         return VStack(alignment: .leading, spacing: 6) {
-            Text(overline)
-                .font(LedgerFont.sansSm())
-                .tracking(1.6)
-                .foregroundStyle(LedgerColor.inkSecondary)
+            HStack(alignment: .center, spacing: 8) {
+                Text(overline)
+                    .font(LedgerFont.sansSm())
+                    .tracking(1.6)
+                    .foregroundStyle(LedgerColor.inkSecondary)
 
-            if wk.routineId == nil {
+                Spacer(minLength: 4)
+
+                if wk.hasRoutines {
+                    Button(store.showInlineRoutinePicker ? "Close List" : "+ Routine") {
+                        LedgerHaptics.light()
+                        store.closeExercisePicker()
+                        pickerFocused = false
+                        assignToDateOnly = !wk.isToday
+                        store.showInlineRoutinePicker.toggle()
+                    }
+                    .buttonStyle(WarmActionButtonStyle(isActive: store.showInlineRoutinePicker))
+                }
+            }
+
+            if !wk.hasRoutines {
                 HStack(alignment: .center, spacing: 8) {
                     Text("No Routine")
                         .font(LedgerFont.serifLg(bold: true))
@@ -256,7 +317,7 @@ struct WorkoutsView: View {
 
                     Button(store.showInlineRoutinePicker ? "Close" : "+ Assign") {
                         LedgerHaptics.light()
-                        store.pickerOpen = false
+                        store.closeExercisePicker()
                         pickerFocused = false
                         assignToDateOnly = !wk.isToday
                         store.showInlineRoutinePicker.toggle()
@@ -268,86 +329,96 @@ struct WorkoutsView: View {
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: false))
                 }
-            } else if store.editRoutineMode {
+            }
+        }
+    }
+
+    private func routineSectionHeader(_ section: DayRoutineSection, in wk: DayWorkout) -> some View {
+        let isEditingThis = store.editRoutineMode && store.editingRoutineId == section.id
+        let isPickerForThis = store.pickerOpen && store.pickerTargetRoutineId == section.id
+
+        return VStack(alignment: .leading, spacing: 8) {
+            if isEditingThis {
                 HStack(spacing: 8) {
                     TextField("Routine title", text: $routineTitleDraft)
                         .font(LedgerFont.serifMd())
                         .foregroundStyle(LedgerColor.inkPrimary)
                         .warmRecessedField()
                         .onSubmit {
-                            store.saveRoutineTitle(routineTitleDraft)
+                            store.saveRoutineDetails(routineId: section.id, title: routineTitleDraft, emblem: routineEmblemDraft)
                         }
 
                     Button("Save") {
-                        store.saveRoutineTitle(routineTitleDraft)
+                        store.saveRoutineDetails(routineId: section.id, title: routineTitleDraft, emblem: routineEmblemDraft)
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: true))
 
                     Button("Done") {
                         LedgerHaptics.light()
                         store.editRoutineMode = false
+                        store.editingRoutineId = nil
                     }
                     .buttonStyle(WarmActionButtonStyle())
                 }
+
+                RoutineEmblemPickerView(selectedEmblem: $routineEmblemDraft)
             } else {
                 HStack(alignment: .center, spacing: 8) {
-                    Text(wk.title)
+                    if !section.emblem.isEmpty {
+                        RoutineEmblemBadgeView(emblem: section.emblem, fontSize: 18)
+                    }
+
+                    Text(section.title)
                         .font(LedgerFont.serifLg(bold: true))
                         .foregroundStyle(LedgerColor.inkPrimary)
                         .lineLimit(2)
 
+                    if wk.routines.count > 1 {
+                        Text("\(section.completedExercises)/\(section.totalExercises)")
+                            .font(LedgerFont.sansSm())
+                            .tracking(0.8)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+                    }
+
                     Spacer(minLength: 4)
 
-                    Button(store.pickerOpen ? "Close" : "+ Add") {
-                        LedgerHaptics.light()
+                    Button(isPickerForThis ? "Close" : "+ Add") {
                         store.showInlineRoutinePicker = false
-                        if store.pickerOpen {
+                        if isPickerForThis {
                             pickerFocused = false
-                            store.pickerOpen = false
-                            store.pickerQuery = ""
-                            store.customLinkedVideoFilename = ""
+                            store.closeExercisePicker()
                         } else {
-                            store.pickerOpen = true
-                            if store.pickerResults.isEmpty {
-                                store.searchExercises(store.pickerQuery)
-                            }
+                            store.openExercisePicker(for: section.id)
                             pickerFocused = true
                         }
                     }
-                    .buttonStyle(WarmActionButtonStyle(isActive: store.pickerOpen))
+                    .buttonStyle(WarmActionButtonStyle(isActive: isPickerForThis))
 
                     Button("Edit") {
                         LedgerHaptics.light()
-                        routineTitleDraft = wk.title
+                        routineTitleDraft = section.title
+                        routineEmblemDraft = section.emblem
+                        store.editingRoutineId = section.id
                         store.editRoutineMode = true
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: false))
                 }
 
                 HStack(spacing: 8) {
-                    Button(store.showInlineRoutinePicker ? "Close List" : "Switch Routine ⌄") {
-                        LedgerHaptics.light()
-                        store.pickerOpen = false
-                        pickerFocused = false
-                        assignToDateOnly = !wk.isToday
-                        store.showInlineRoutinePicker.toggle()
-                    }
-                    .buttonStyle(WarmActionButtonStyle(isActive: store.showInlineRoutinePicker))
-
                     Button("Remove") {
                         if wk.scheduleSource == .dateOverride {
                             LedgerHaptics.heavy()
                             pendingConfirm = PendingActionConfirmation(
                                 title: "Remove Routine for \(wk.displayDateShort)?",
-                                message: "Remove \"\(wk.title)\" from \(wk.displayDateShort)? Any logged sets for this date stay saved.",
+                                message: "Remove \"\(section.title)\" from \(wk.displayDateShort)? Any logged sets for this date stay saved.",
                                 confirmLabel: "Remove",
                                 isDestructive: true
                             ) {
-                                store.removeRoutineFromSelectedDateOnly()
+                                store.unassignRoutine(section.id, fromSelectedDateOnly: true)
                             }
                         } else {
                             LedgerHaptics.heavy()
-                            removeDialogPresented = true
+                            removeTargetRoutine = section
                         }
                     }
                     .buttonStyle(WarmActionButtonStyle())
@@ -372,6 +443,14 @@ struct WorkoutsView: View {
                     assignToDateOnly = false
                 }
                 .buttonStyle(WarmActionButtonStyle(isActive: !assignToDateOnly))
+
+                Spacer()
+
+                Button("Done") {
+                    LedgerHaptics.light()
+                    store.showInlineRoutinePicker = false
+                }
+                .buttonStyle(WarmActionButtonStyle())
             }
 
             if store.routines.isEmpty {
@@ -382,8 +461,13 @@ struct WorkoutsView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(store.routines) { r in
-                            let isActive = wk.routineId == r.id
+                            let isAssigned: Bool = assignToDateOnly
+                                ? wk.routineIds.contains(r.id)
+                                : r.assignedWeekdays.contains(wk.dayOfWeek)
                             HStack(spacing: 8) {
+                                if !r.emblem.isEmpty {
+                                    RoutineEmblemBadgeView(emblem: r.emblem, fontSize: 15)
+                                }
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(r.title)
                                         .font(LedgerFont.serifMd(semibold: true))
@@ -394,15 +478,19 @@ struct WorkoutsView: View {
                                         .foregroundStyle(LedgerColor.inkSecondary)
                                 }
                                 Spacer()
-                                Button(isActive ? "Active" : "Assign") {
-                                    store.assignRoutine(r.id, toSelectedDateOnly: assignToDateOnly)
+                                Button(isAssigned ? "Assigned ✓" : "+ Add") {
+                                    if isAssigned {
+                                        store.unassignRoutine(r.id, fromSelectedDateOnly: assignToDateOnly)
+                                    } else {
+                                        store.assignRoutine(r.id, toSelectedDateOnly: assignToDateOnly)
+                                    }
                                 }
-                                .buttonStyle(WarmActionButtonStyle(isActive: isActive))
+                                .buttonStyle(WarmActionButtonStyle(isActive: isAssigned))
                             }
                         }
                     }
                 }
-                .frame(maxHeight: 190)
+                .frame(maxHeight: 200)
             }
 
             Button("+ Create Custom Routine") {
@@ -414,10 +502,11 @@ struct WorkoutsView: View {
         .softPanel()
     }
 
-    private func exerciseBlock(_ ex: RoutineExerciseItem) -> some View {
-        let isExpanded = store.expandedExerciseIds.contains(ex.id)
-        let videoOpen = store.openVideoIds.contains(ex.id)
-        let trendOpen = store.openTrendIds.contains(ex.id)
+    private func exerciseBlock(_ ex: RoutineExerciseItem, routineId: String) -> some View {
+        let expandKey = "\(routineId)_\(ex.id)"
+        let isExpanded = store.expandedExerciseIds.contains(expandKey)
+        let videoOpen = store.openVideoIds.contains(expandKey)
+        let trendOpen = store.openTrendIds.contains(expandKey)
         let doneCount = ex.sets.filter(\.completed).count
         let isComplete = !ex.sets.isEmpty && doneCount == ex.sets.count
         let statusLine = "\(ex.muscleHint.uppercased())\(ex.isCustom ? " · CUSTOM" : "") · \(ex.sets.isEmpty ? "0 SETS" : "\(doneCount)/\(ex.sets.count) SETS")\(compactVolumeSuffix(ex))"
@@ -425,7 +514,7 @@ struct WorkoutsView: View {
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 10) {
                 Button {
-                    store.toggleExerciseExpanded(ex.id)
+                    store.toggleExerciseExpanded(expandKey)
                 } label: {
                     HStack(alignment: .center, spacing: 10) {
                         HandDrawnCheckboxView(isChecked: isComplete)
@@ -450,7 +539,7 @@ struct WorkoutsView: View {
                 .buttonStyle(.plain)
 
                 HStack(spacing: 4) {
-                    if store.editRoutineMode {
+                    if store.editRoutineMode && store.editingRoutineId == routineId {
                         Button {
                             pendingConfirm = PendingActionConfirmation(
                                 title: "Remove Exercise?",
@@ -458,7 +547,7 @@ struct WorkoutsView: View {
                                 confirmLabel: "Remove",
                                 isDestructive: true
                             ) {
-                                store.removeExerciseFromCurrentDay(ex.id)
+                                store.removeExercise(ex.id, fromRoutine: routineId)
                             }
                         } label: {
                             Text("×")
@@ -468,7 +557,7 @@ struct WorkoutsView: View {
                     }
 
                     Button {
-                        store.toggleExerciseExpanded(ex.id)
+                        store.toggleExerciseExpanded(expandKey)
                     } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 12, weight: .semibold))
@@ -486,7 +575,7 @@ struct WorkoutsView: View {
 
                 HStack(spacing: 8) {
                     Button(progressionButtonLabel(ex)) {
-                        store.toggleTrend(ex.id)
+                        store.toggleTrend(expandKey)
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: ex.progression.status == .yes))
 
@@ -494,7 +583,7 @@ struct WorkoutsView: View {
 
                     if BundleVideoResolver.url(for: ex.videoFilename) != nil {
                         Button {
-                            store.toggleVideo(ex.id)
+                            store.toggleVideo(expandKey)
                         } label: {
                             HStack(spacing: 4) {
                                 if !videoOpen {
@@ -557,12 +646,12 @@ struct WorkoutsView: View {
 
                         if isComplete {
                             Button("Minimize ↑") {
-                                store.toggleExerciseExpanded(ex.id)
+                                store.toggleExerciseExpanded(expandKey)
                             }
                             .buttonStyle(WarmActionButtonStyle(isActive: false))
                         } else {
                             Button("Complete & Minimize") {
-                                store.completeAndMinimizeExercise(ex)
+                                store.completeAndMinimizeExercise(ex, key: expandKey)
                             }
                             .buttonStyle(PrimaryActionButtonStyle())
                         }
@@ -610,10 +699,13 @@ struct WorkoutsView: View {
         return " · \(Int(p.latestVolume.rounded()).formatted()) \(unit.uppercased())"
     }
 
-    private func inlineExercisePicker() -> some View {
-        let assignedIds = Set(store.workout?.exercises.map(\.id) ?? [])
+    private func inlineExercisePicker(for section: DayRoutineSection) -> some View {
+        let assignedIds = Set(section.exercises.map(\.id))
         let qTrim = store.pickerQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let exactMatch = store.pickerResults.contains { $0.name.caseInsensitiveCompare(qTrim) == .orderedSame }
+        let visibleResults = Array(store.pickerResults.prefix(
+            (store.pickerMuscleRegion == .all && qTrim.isEmpty) ? 20 : 50
+        ))
 
         return VStack(alignment: .leading, spacing: 10) {
             TextField(
@@ -627,6 +719,27 @@ struct WorkoutsView: View {
             .foregroundStyle(LedgerColor.inkPrimary)
             .focused($pickerFocused)
             .warmRecessedField()
+
+            MuscleGroupFilterBar(
+                selectedRegion: Binding(
+                    get: { store.pickerMuscleRegion },
+                    set: { newRegion in
+                        store.pickerMuscleRegion = newRegion
+                        store.pickerMuscleSubGroup = nil
+                        store.refreshPickerResults()
+                    }
+                ),
+                selectedSubGroup: Binding(
+                    get: { store.pickerMuscleSubGroup },
+                    set: { newSub in
+                        store.pickerMuscleSubGroup = newSub
+                        if let sub = newSub {
+                            store.customQuickMuscleGroup = sub
+                        }
+                        store.refreshPickerResults()
+                    }
+                )
+            )
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -653,15 +766,24 @@ struct WorkoutsView: View {
                                 pickerFocused = false
                                 pendingConfirm = PendingActionConfirmation(
                                     title: "Create Custom Exercise?",
-                                    message: "Create custom movement \"\(qTrim)\" and add it to your workout day?",
+                                    message: "Create custom movement \"\(qTrim)\" (\(store.customQuickMuscleGroup.rawValue)) and add it to \"\(section.title)\"?",
                                     confirmLabel: "Create",
                                     isDestructive: false
                                 ) {
-                                    store.createCustomExercise()
+                                    store.createCustomExercise(muscleHint: store.customQuickMuscleGroup.rawValue)
                                 }
                             }
                             .buttonStyle(PrimaryActionButtonStyle())
                         }
+
+                        Picker("Muscle Group", selection: $store.customQuickMuscleGroup) {
+                            ForEach(MuscleSubGroup.allCases) { grp in
+                                Text(grp.rawValue).tag(grp)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(LedgerColor.inkPrimary)
+                        .font(LedgerFont.sansSm())
 
                         let filmCandidates = store.pickerResults.filter { $0.videoFilename != nil }.prefix(6)
                         if !filmCandidates.isEmpty {
@@ -678,14 +800,14 @@ struct WorkoutsView: View {
                     }
                 }
 
-                if store.pickerResults.isEmpty {
-                    Text("No matching MoveKit films. Use “+ Custom” above.")
+                if visibleResults.isEmpty {
+                    Text("No matching movements in this group. Clear filters or use “+ Custom” above.")
                         .font(LedgerFont.sansSm())
                         .foregroundStyle(LedgerColor.inkSecondary)
                 } else {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 10) {
-                            ForEach(store.pickerResults.prefix(20)) { res in
+                            ForEach(visibleResults) { res in
                                 let already = assignedIds.contains(res.id)
                                 HStack(spacing: 8) {
                                     VStack(alignment: .leading, spacing: 2) {
@@ -699,7 +821,7 @@ struct WorkoutsView: View {
                                     }
                                     Spacer()
                                     Button(already ? "Added" : "+ Add") {
-                                        store.addExerciseToCurrentDay(res.id)
+                                        store.addExerciseToCurrentDay(res.id, routineId: section.id)
                                     }
                                     .buttonStyle(WarmActionButtonStyle(isActive: already))
                                     .disabled(already)
@@ -707,7 +829,7 @@ struct WorkoutsView: View {
                             }
                         }
                     }
-                    .frame(maxHeight: 210)
+                    .frame(maxHeight: 220)
                 }
             }
             .softPanel()

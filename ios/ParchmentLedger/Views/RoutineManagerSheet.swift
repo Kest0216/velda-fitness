@@ -18,15 +18,20 @@ struct RoutineManagerSheet: View {
 
     // Manual Editor state
     @State private var draftTitle: String = ""
+    @State private var draftEmblem: String = ""
     @State private var draftExercises: [Exercise] = []
     @State private var draftWeekdays: Set<Int> = []
     @State private var draftAssignSelectedDate: Bool = false
     @State private var searchQuery: String = ""
+    @State private var filterRegion: MuscleRegion = .all
+    @State private var filterSubGroup: MuscleSubGroup? = nil
+    @State private var customMuscleGroup: MuscleSubGroup = .custom
     @State private var searchResults: [Exercise] = []
     @State private var customFilmFilename: String = ""
 
     // AI "Create for Me" state
     @State private var aiPrompt: String = ""
+    @State private var aiEmblem: String = ""
     @State private var aiWeekdays: Set<Int> = []
     @State private var aiAssignSelectedDate: Bool = true
     @State private var aiIncludeCustom: Bool = true
@@ -72,7 +77,7 @@ struct RoutineManagerSheet: View {
         }
         .ledgerToastOverlay(store.toastMessage)
         .onAppear {
-            searchResults = DatabaseManager.shared.fuzzySearchExercises(query: "", limit: 30)
+            refreshSearchResults()
             sheetEpoch &+= 1
             if store.routineManagerStartInCreate {
                 store.routineManagerStartInCreate = false
@@ -308,6 +313,16 @@ struct RoutineManagerSheet: View {
                 .inkWritten(index: 0, epoch: sheetEpoch)
 
                 VStack(alignment: .leading, spacing: 6) {
+                    Text("CALENDAR EMBLEM (OPTIONAL)")
+                        .font(LedgerFont.sansSm())
+                        .tracking(1.6)
+                        .foregroundStyle(LedgerColor.inkSecondary)
+
+                    RoutineEmblemPickerView(selectedEmblem: $aiEmblem)
+                }
+                .inkWritten(index: 1, epoch: sheetEpoch)
+
+                VStack(alignment: .leading, spacing: 6) {
                     Text("ASSIGN TO WEEKLY STRIP")
                         .font(LedgerFont.sansSm())
                         .tracking(1.6)
@@ -391,11 +406,13 @@ struct RoutineManagerSheet: View {
                             Task {
                                 if let _ = await store.generateRoutineForMe(
                                     prompt: cleanPrompt,
+                                    emblem: aiEmblem,
                                     weekdays: Array(aiWeekdays).sorted(),
                                     assignSelectedDate: aiAssignSelectedDate,
                                     includeCustomExercises: aiIncludeCustom
                                 ) {
                                     aiPrompt = ""
+                                    aiEmblem = ""
                                     isAICreating = false
                                     sheetEpoch &+= 1
                                 }
@@ -448,10 +465,15 @@ struct RoutineManagerSheet: View {
     private func routineLibraryCard(_ routine: RoutineSummary) -> some View {
         let previewNames = routine.exercises.prefix(4).map(\.name).joined(separator: " · ")
         let overflow = routine.exercises.count > 4 ? " +\(routine.exercises.count - 4)" : ""
-        let assignedToViewedDate = store.workout?.routineId == routine.id
+        let assignedToViewedDate = store.workout?.routineIds.contains(routine.id) == true
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 8) {
+                if !routine.emblem.isEmpty {
+                    RoutineEmblemBadgeView(emblem: routine.emblem, fontSize: 17)
+                        .padding(.top, 1)
+                }
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text(routine.title)
                         .font(LedgerFont.serifMd(semibold: true))
@@ -468,7 +490,7 @@ struct RoutineManagerSheet: View {
 
             // 1-click weekly assignment strip
             VStack(alignment: .leading, spacing: 4) {
-                Text("WEEKLY SCHEDULE (TAP DAYS TO ASSIGN)")
+                Text("WEEKLY SCHEDULE (TAP DAYS · MULTIPLE PER DAY)")
                     .font(LedgerFont.sansSm())
                     .tracking(1.2)
                     .foregroundStyle(LedgerColor.inkSecondary)
@@ -509,8 +531,8 @@ struct RoutineManagerSheet: View {
             }
 
             HStack(spacing: 8) {
-                Button(assignedToViewedDate ? "On \(selectedDateShort)" : "Assign \(selectedDateShort)") {
-                    store.assignRoutine(routine.id, toSelectedDateOnly: true)
+                Button(assignedToViewedDate ? "On \(selectedDateShort) ✓" : "+ \(selectedDateShort)") {
+                    store.toggleRoutineOnSelectedDate(routine.id)
                 }
                 .buttonStyle(WarmActionButtonStyle(isActive: assignedToViewedDate))
 
@@ -580,6 +602,26 @@ struct RoutineManagerSheet: View {
                         .warmRecessedField()
                 }
                 .inkWritten(index: 0, epoch: sheetEpoch)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("CALENDAR EMBLEM (OPTIONAL)")
+                        .font(LedgerFont.sansSm())
+                        .tracking(1.6)
+                        .foregroundStyle(LedgerColor.inkSecondary)
+
+                    RoutineEmblemPickerView(selectedEmblem: $draftEmblem)
+                }
+                .inkWritten(index: 1, epoch: sheetEpoch)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("CALENDAR EMBLEM (OPTIONAL)")
+                        .font(LedgerFont.sansSm())
+                        .tracking(1.6)
+                        .foregroundStyle(LedgerColor.inkSecondary)
+
+                    RoutineEmblemPickerView(selectedEmblem: $aiEmblem)
+                }
+                .inkWritten(index: 1, epoch: sheetEpoch)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("ASSIGN TO WEEKLY STRIP")
@@ -686,18 +728,43 @@ struct RoutineManagerSheet: View {
                 .inkWritten(index: 2, epoch: sheetEpoch)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("ADD MOVEMENTS (588 MOVEKIT OR CUSTOM)")
-                        .font(LedgerFont.sansSm())
-                        .tracking(1.6)
-                        .foregroundStyle(LedgerColor.inkSecondary)
+                    HStack {
+                        Text("ADD MOVEMENTS (588 MOVEKIT OR CUSTOM)")
+                            .font(LedgerFont.sansSm())
+                            .tracking(1.6)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+
+                        Spacer()
+
+                        if filterRegion != .all || !qTrim.isEmpty {
+                            Text("\(searchResults.count) MATCHING")
+                                .font(LedgerFont.sansSm())
+                                .tracking(0.8)
+                                .foregroundStyle(LedgerColor.inkSecondary)
+                        }
+                    }
 
                     TextField("Fuzzy search or type custom movement...", text: $searchQuery)
                         .font(LedgerFont.serifMd())
                         .foregroundStyle(LedgerColor.inkPrimary)
                         .warmRecessedField()
-                        .onChange(of: searchQuery) { _, val in
-                            searchResults = DatabaseManager.shared.fuzzySearchExercises(query: val, limit: 30)
+                        .onChange(of: searchQuery) { _, _ in
+                            refreshSearchResults()
                         }
+
+                    MuscleGroupFilterBar(
+                        selectedRegion: $filterRegion,
+                        selectedSubGroup: $filterSubGroup
+                    )
+                    .onChange(of: filterRegion) { _, _ in
+                        refreshSearchResults()
+                    }
+                    .onChange(of: filterSubGroup) { _, newSub in
+                        if let sub = newSub {
+                            customMuscleGroup = sub
+                        }
+                        refreshSearchResults()
+                    }
 
                     VStack(alignment: .leading, spacing: 10) {
                         if !qTrim.isEmpty && !exactMatch {
@@ -710,15 +777,25 @@ struct RoutineManagerSheet: View {
                                     Button("+ Custom") {
                                         let created = store.createCustomExerciseOnly(
                                             name: qTrim,
+                                            muscleHint: customMuscleGroup.rawValue,
                                             videoFilename: customFilmFilename.isEmpty ? nil : customFilmFilename
                                         )
                                         draftExercises.append(created)
                                         searchQuery = ""
                                         customFilmFilename = ""
-                                        searchResults = DatabaseManager.shared.fuzzySearchExercises(query: "", limit: 30)
+                                        refreshSearchResults()
                                     }
                                     .buttonStyle(WarmActionButtonStyle(isActive: true))
                                 }
+
+                                Picker("Muscle Group", selection: $customMuscleGroup) {
+                                    ForEach(MuscleSubGroup.allCases) { grp in
+                                        Text(grp.rawValue).tag(grp)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .tint(LedgerColor.inkPrimary)
+                                .font(LedgerFont.sansSm())
 
                                 let filmCandidates = searchResults.filter { $0.videoFilename != nil }.prefix(6)
                                 if !filmCandidates.isEmpty {
@@ -735,27 +812,34 @@ struct RoutineManagerSheet: View {
                             }
                         }
 
-                        ForEach(searchResults.prefix(25)) { res in
-                            let already = selectedIds.contains(res.id)
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(res.name)
-                                        .font(LedgerFont.serifMd())
-                                        .foregroundStyle(LedgerColor.inkPrimary)
-                                        .lineLimit(1)
-                                    Text("\(res.muscleHint.uppercased()) · \(res.videoFilename != nil ? "FILM" : "CUSTOM")")
-                                        .font(LedgerFont.sansSm())
-                                        .foregroundStyle(LedgerColor.inkSecondary)
-                                }
-                                Spacer()
-                                Button(already ? "Added" : "+ Add") {
-                                    if !already {
-                                        LedgerHaptics.heavy()
-                                        draftExercises.append(res)
+                        let visibleLimit = (filterRegion == .all && qTrim.isEmpty) ? 25 : 60
+                        if searchResults.isEmpty {
+                            Text("No matching movements in this filter.")
+                                .font(LedgerFont.sansSm())
+                                .foregroundStyle(LedgerColor.inkSecondary)
+                        } else {
+                            ForEach(searchResults.prefix(visibleLimit)) { res in
+                                let already = selectedIds.contains(res.id)
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(res.name)
+                                            .font(LedgerFont.serifMd())
+                                            .foregroundStyle(LedgerColor.inkPrimary)
+                                            .lineLimit(1)
+                                        Text("\(res.muscleHint.uppercased()) · \(res.videoFilename != nil ? "FILM" : "CUSTOM")")
+                                            .font(LedgerFont.sansSm())
+                                            .foregroundStyle(LedgerColor.inkSecondary)
                                     }
+                                    Spacer()
+                                    Button(already ? "Added" : "+ Add") {
+                                        if !already {
+                                            LedgerHaptics.heavy()
+                                            draftExercises.append(res)
+                                        }
+                                    }
+                                    .buttonStyle(WarmActionButtonStyle(isActive: already))
+                                    .disabled(already)
                                 }
-                                .buttonStyle(WarmActionButtonStyle(isActive: already))
-                                .disabled(already)
                             }
                         }
                     }
@@ -768,12 +852,23 @@ struct RoutineManagerSheet: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
+    private func refreshSearchResults() {
+        let isFiltered = filterRegion != .all || filterSubGroup != nil || !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        searchResults = DatabaseManager.shared.fuzzySearchExercises(
+            query: searchQuery,
+            region: filterRegion,
+            subGroup: filterSubGroup,
+            limit: isFiltered ? 80 : 30
+        )
+    }
+
     private func startAICreateMode() {
         editingRoutineId = nil
         isCreatingNew = false
         isAICreating = true
         store.routineAIError = nil
         aiPrompt = ""
+        aiEmblem = ""
         aiWeekdays = [store.selectedDow]
         aiAssignSelectedDate = true
         sheetEpoch &+= 1
@@ -784,12 +879,16 @@ struct RoutineManagerSheet: View {
         editingRoutineId = nil
         isCreatingNew = true
         draftTitle = ""
+        draftEmblem = ""
         draftExercises = []
         draftWeekdays = [store.selectedDow]
         draftAssignSelectedDate = true
         searchQuery = ""
+        filterRegion = .all
+        filterSubGroup = nil
+        customMuscleGroup = .custom
         customFilmFilename = ""
-        searchResults = DatabaseManager.shared.fuzzySearchExercises(query: "", limit: 30)
+        refreshSearchResults()
         sheetEpoch &+= 1
     }
 
@@ -798,12 +897,16 @@ struct RoutineManagerSheet: View {
         isCreatingNew = false
         editingRoutineId = routine.id
         draftTitle = routine.title
+        draftEmblem = routine.emblem
         draftExercises = routine.exercises
         draftWeekdays = Set(routine.assignedWeekdays)
         draftAssignSelectedDate = false
         searchQuery = ""
+        filterRegion = .all
+        filterSubGroup = nil
+        customMuscleGroup = .custom
         customFilmFilename = ""
-        searchResults = DatabaseManager.shared.fuzzySearchExercises(query: "", limit: 30)
+        refreshSearchResults()
         sheetEpoch &+= 1
     }
 
@@ -812,9 +915,12 @@ struct RoutineManagerSheet: View {
         isCreatingNew = false
         editingRoutineId = nil
         draftTitle = ""
+        draftEmblem = ""
         draftExercises = []
         draftWeekdays = []
         searchQuery = ""
+        filterRegion = .all
+        filterSubGroup = nil
         customFilmFilename = ""
     }
 
@@ -824,6 +930,7 @@ struct RoutineManagerSheet: View {
             store.updateRoutine(
                 id: rid,
                 title: draftTitle,
+                emblem: draftEmblem,
                 exerciseIds: exIds,
                 weekdays: Array(draftWeekdays).sorted()
             )
@@ -832,6 +939,7 @@ struct RoutineManagerSheet: View {
         } else {
             store.createRoutine(
                 title: draftTitle,
+                emblem: draftEmblem,
                 exerciseIds: exIds,
                 weekdays: Array(draftWeekdays).sorted(),
                 assignSelectedDate: draftAssignSelectedDate

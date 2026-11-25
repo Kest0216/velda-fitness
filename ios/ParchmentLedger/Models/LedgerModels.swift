@@ -56,6 +56,144 @@ struct MoveKitManifestEntry: Codable {
     let muscleHint: String
 }
 
+enum MuscleRegion: String, CaseIterable, Identifiable {
+    case all = "All"
+    case chest = "Chest"
+    case back = "Back"
+    case shoulders = "Shoulders"
+    case arms = "Arms"
+    case legs = "Legs"
+    case core = "Core"
+    case conditioning = "Conditioning"
+    case mobility = "Mobility"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+
+    var subGroups: [MuscleSubGroup] {
+        switch self {
+        case .all: return []
+        case .chest: return [.chest]
+        case .back: return [.lats, .upperBack, .traps, .lowerBack]
+        case .shoulders: return [.frontDelts, .sideDelts, .rearDelts]
+        case .arms: return [.biceps, .triceps, .forearms]
+        case .legs: return [.quads, .hamstrings, .glutes, .calves]
+        case .core: return [.abs, .obliques]
+        case .conditioning: return [.cardio, .fullBodyPlyo]
+        case .mobility: return [.mobility]
+        case .custom: return [.custom]
+        }
+    }
+
+    static var filterRegions: [MuscleRegion] {
+        [.all, .chest, .back, .shoulders, .arms, .legs, .core, .conditioning, .mobility]
+    }
+
+    static var pickerRegions: [MuscleRegion] {
+        [.chest, .back, .shoulders, .arms, .legs, .core, .conditioning, .mobility, .custom]
+    }
+
+    func matches(muscleHint: String, subGroup: MuscleSubGroup?) -> Bool {
+        let normalized = muscleHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let sub = subGroup {
+            return normalized == sub.rawValue.lowercased()
+        }
+        if self == .all {
+            return true
+        }
+        if subGroups.contains(where: { $0.rawValue.lowercased() == normalized }) {
+            return true
+        }
+        switch self {
+        case .chest: return normalized == "push"
+        case .back: return normalized == "pull" || normalized == "back"
+        case .shoulders: return normalized == "shoulders"
+        case .arms: return normalized == "arms"
+        case .legs: return normalized == "legs"
+        case .core: return normalized == "core"
+        case .conditioning: return normalized == "strength" || normalized == "conditioning"
+        case .mobility: return normalized == "mobility"
+        case .custom: return normalized == "custom"
+        case .all: return true
+        }
+    }
+}
+
+enum MuscleSubGroup: String, CaseIterable, Identifiable {
+    case chest = "Chest"
+    case lats = "Lats"
+    case upperBack = "Upper Back"
+    case traps = "Traps"
+    case lowerBack = "Lower Back"
+    case frontDelts = "Front Delts"
+    case sideDelts = "Side Delts"
+    case rearDelts = "Rear Delts"
+    case biceps = "Biceps"
+    case triceps = "Triceps"
+    case forearms = "Forearms"
+    case quads = "Quads"
+    case hamstrings = "Hamstrings"
+    case glutes = "Glutes"
+    case calves = "Calves"
+    case abs = "Abs"
+    case obliques = "Obliques"
+    case cardio = "Cardio"
+    case fullBodyPlyo = "Full Body & Plyo"
+    case mobility = "Mobility"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+
+    var region: MuscleRegion {
+        switch self {
+        case .chest: return .chest
+        case .lats, .upperBack, .traps, .lowerBack: return .back
+        case .frontDelts, .sideDelts, .rearDelts: return .shoulders
+        case .biceps, .triceps, .forearms: return .arms
+        case .quads, .hamstrings, .glutes, .calves: return .legs
+        case .abs, .obliques: return .core
+        case .cardio, .fullBodyPlyo: return .conditioning
+        case .mobility: return .mobility
+        case .custom: return .custom
+        }
+    }
+
+    static func fromHint(_ raw: String) -> MuscleSubGroup? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let exact = allCases.first(where: { $0.rawValue.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return exact
+        }
+        switch trimmed.lowercased() {
+        case "push": return .chest
+        case "pull", "back": return .lats
+        case "shoulders": return .frontDelts
+        case "arms": return .biceps
+        case "legs": return .quads
+        case "core": return .abs
+        case "strength", "conditioning": return .fullBodyPlyo
+        case "mobility": return .mobility
+        case "custom": return .custom
+        default: return nil
+        }
+    }
+}
+
+enum RoutineEmblemCatalog {
+    static let shapes: [String] = ["●", "▲", "■", "◆", "★", "✦", "✚", "◉", "△", "□", "◇", "☆"]
+    static let emojis: [String] = ["🏋️", "💪", "🔥", "⚡", "🏃", "🚴", "🏊", "🧘", "🤸", "🥊", "🦵", "🫀", "🧗", "🎯", "⏱️", "☀️", "🌙", "🌿"]
+    static let shapeSet: Set<String> = Set(shapes)
+
+    static func isShape(_ value: String) -> Bool {
+        shapeSet.contains(value)
+    }
+
+    static func sanitize(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return String(trimmed.prefix(2))
+    }
+}
+
 enum ExerciseTrackingType: String, CaseIterable, Identifiable, Codable {
     case weighted
     case bodyweight
@@ -153,8 +291,36 @@ enum ScheduleSource: String, Equatable {
 struct RoutineSummary: Identifiable, Equatable, Codable {
     let id: String
     let title: String
+    var emblem: String = ""
     let exercises: [Exercise]
     let assignedWeekdays: [Int] // 0=Mon .. 6=Sun
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, emblem, exercises, assignedWeekdays
+    }
+
+    init(id: String, title: String, emblem: String = "", exercises: [Exercise], assignedWeekdays: [Int]) {
+        self.id = id
+        self.title = title
+        self.emblem = emblem
+        self.exercises = exercises
+        self.assignedWeekdays = assignedWeekdays
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        emblem = try c.decodeIfPresent(String.self, forKey: .emblem) ?? ""
+        exercises = try c.decode([Exercise].self, forKey: .exercises)
+        assignedWeekdays = try c.decode([Int].self, forKey: .assignedWeekdays)
+    }
+}
+
+struct CalendarRoutineMarker: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let emblem: String
 }
 
 struct WeekDaySlot: Identifiable, Equatable {
@@ -166,6 +332,7 @@ struct WeekDaySlot: Identifiable, Equatable {
     let isToday: Bool
     let hasRoutine: Bool
     let hasLoggedSets: Bool
+    var routineMarkers: [CalendarRoutineMarker] = []
 }
 
 struct MonthDaySlot: Identifiable, Equatable {
@@ -175,6 +342,17 @@ struct MonthDaySlot: Identifiable, Equatable {
     let isToday: Bool
     let hasRoutine: Bool
     let hasLoggedSets: Bool
+    var routineMarkers: [CalendarRoutineMarker] = []
+}
+
+struct DayRoutineSection: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let emblem: String
+    let exercises: [RoutineExerciseItem]
+    let completedExercises: Int
+    let totalExercises: Int
+    let totalSetsDone: Int
 }
 
 struct DayWorkout: Equatable {
@@ -184,14 +362,22 @@ struct DayWorkout: Equatable {
     let sessionDate: String
     let displayDateShort: String
     let isToday: Bool
-    let routineId: String?
     let scheduleSource: ScheduleSource
-    let title: String
-    let exercises: [RoutineExerciseItem]
+    let routines: [DayRoutineSection]
     let completionPct: Int
     let completedExercises: Int
     let totalExercises: Int
     let totalSetsDone: Int
+
+    var hasRoutines: Bool { !routines.isEmpty }
+    var routineId: String? { routines.first?.id }
+    var routineIds: Set<String> { Set(routines.map(\.id)) }
+    var title: String {
+        if routines.isEmpty { return "Rest Day" }
+        if routines.count == 1 { return routines[0].title }
+        return routines.map(\.title).joined(separator: " + ")
+    }
+    var exercises: [RoutineExerciseItem] { routines.flatMap(\.exercises) }
 }
 
 struct Recipe: Identifiable, Equatable, Codable {
@@ -524,6 +710,79 @@ struct EstimatedMealMacros: Codable, Equatable {
     let notes: String
 }
 
+struct SavedMeal: Identifiable, Codable, Equatable {
+    let id: String
+    var name: String
+    var defaultMealSlot: String
+    var kcal: Int
+    var proteinG: Int
+    var carbsG: Int
+    var fatG: Int
+    var sodiumMg: Int
+    var sugarG: Int
+    var cholesterolMg: Int
+    var notes: String
+    var useCount: Int
+    var lastUsedAt: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, defaultMealSlot, kcal, proteinG, carbsG, fatG
+        case sodiumMg, sugarG, cholesterolMg, notes, useCount, lastUsedAt, createdAt
+    }
+
+    init(
+        id: String,
+        name: String,
+        defaultMealSlot: String = "Lunch",
+        kcal: Int,
+        proteinG: Int,
+        carbsG: Int,
+        fatG: Int,
+        sodiumMg: Int = 0,
+        sugarG: Int = 0,
+        cholesterolMg: Int = 0,
+        notes: String = "",
+        useCount: Int = 1,
+        lastUsedAt: String,
+        createdAt: String
+    ) {
+        self.id = id
+        self.name = name
+        self.defaultMealSlot = defaultMealSlot
+        self.kcal = kcal
+        self.proteinG = proteinG
+        self.carbsG = carbsG
+        self.fatG = fatG
+        self.sodiumMg = sodiumMg
+        self.sugarG = sugarG
+        self.cholesterolMg = cholesterolMg
+        self.notes = notes
+        self.useCount = max(1, useCount)
+        self.lastUsedAt = lastUsedAt
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? "meal_\(UUID().uuidString.prefix(8).lowercased())"
+        name = try c.decode(String.self, forKey: .name)
+        defaultMealSlot = try c.decodeIfPresent(String.self, forKey: .defaultMealSlot) ?? "Lunch"
+        kcal = try c.decodeIfPresent(Int.self, forKey: .kcal) ?? 0
+        proteinG = try c.decodeIfPresent(Int.self, forKey: .proteinG) ?? 0
+        carbsG = try c.decodeIfPresent(Int.self, forKey: .carbsG) ?? 0
+        fatG = try c.decodeIfPresent(Int.self, forKey: .fatG) ?? 0
+        sodiumMg = try c.decodeIfPresent(Int.self, forKey: .sodiumMg) ?? 0
+        sugarG = try c.decodeIfPresent(Int.self, forKey: .sugarG) ?? 0
+        cholesterolMg = try c.decodeIfPresent(Int.self, forKey: .cholesterolMg) ?? 0
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        useCount = max(1, try c.decodeIfPresent(Int.self, forKey: .useCount) ?? 1)
+        let now = DatabaseManager.nowISO()
+        lastUsedAt = try c.decodeIfPresent(String.self, forKey: .lastUsedAt) ?? now
+        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt) ?? lastUsedAt
+    }
+}
+
 // MARK: - Cycle / Menstrual Models
 
 enum CyclePhase: String, CaseIterable, Equatable {
@@ -764,6 +1023,7 @@ enum ExportDomain: String, CaseIterable, Identifiable {
     case customExercises
     case bodyWeight
     case macros
+    case savedMeals
     case recipes
     case cycle
 
@@ -777,6 +1037,7 @@ enum ExportDomain: String, CaseIterable, Identifiable {
         case .customExercises: return "Custom Exercises"
         case .bodyWeight: return "Body Weight"
         case .macros: return "Diet & Macros"
+        case .savedMeals: return "Saved Meals"
         case .recipes: return "Recipes"
         case .cycle: return "Cycle Log"
         }
@@ -845,8 +1106,129 @@ struct VeldaFullSnapshot: Codable, Equatable {
     let weightLogs: [WeightLogEntry]
     let macroTargets: MacroTargets
     let macroLogs: [MacroLogEntry]
+    let savedMeals: [SavedMeal]
     let recipes: [Recipe]
     let cycleLogs: [CycleLogEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, appName, exportedAt, weightUnit, cycleTrackingEnabled
+        case customExercises, routines, dateSchedules, workoutSets, weightLogs
+        case macroTargets, macroLogs, savedMeals, recipes, cycleLogs
+    }
+
+    init(
+        schemaVersion: Int,
+        appName: String,
+        exportedAt: String,
+        weightUnit: String,
+        cycleTrackingEnabled: Bool,
+        customExercises: [Exercise],
+        routines: [RoutineSummary],
+        dateSchedules: [ExportDateScheduleEntry],
+        workoutSets: [ExportWorkoutSet],
+        weightLogs: [WeightLogEntry],
+        macroTargets: MacroTargets,
+        macroLogs: [MacroLogEntry],
+        savedMeals: [SavedMeal] = [],
+        recipes: [Recipe],
+        cycleLogs: [CycleLogEntry]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.appName = appName
+        self.exportedAt = exportedAt
+        self.weightUnit = weightUnit
+        self.cycleTrackingEnabled = cycleTrackingEnabled
+        self.customExercises = customExercises
+        self.routines = routines
+        self.dateSchedules = dateSchedules
+        self.workoutSets = workoutSets
+        self.weightLogs = weightLogs
+        self.macroTargets = macroTargets
+        self.macroLogs = macroLogs
+        self.savedMeals = savedMeals
+        self.recipes = recipes
+        self.cycleLogs = cycleLogs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        appName = try c.decode(String.self, forKey: .appName)
+        exportedAt = try c.decode(String.self, forKey: .exportedAt)
+        weightUnit = try c.decode(String.self, forKey: .weightUnit)
+        cycleTrackingEnabled = try c.decode(Bool.self, forKey: .cycleTrackingEnabled)
+        customExercises = try c.decode([Exercise].self, forKey: .customExercises)
+        routines = try c.decode([RoutineSummary].self, forKey: .routines)
+        dateSchedules = try c.decode([ExportDateScheduleEntry].self, forKey: .dateSchedules)
+        workoutSets = try c.decode([ExportWorkoutSet].self, forKey: .workoutSets)
+        weightLogs = try c.decode([WeightLogEntry].self, forKey: .weightLogs)
+        macroTargets = try c.decode(MacroTargets.self, forKey: .macroTargets)
+        macroLogs = try c.decode([MacroLogEntry].self, forKey: .macroLogs)
+        savedMeals = try c.decodeIfPresent([SavedMeal].self, forKey: .savedMeals) ?? []
+        recipes = try c.decode([Recipe].self, forKey: .recipes)
+        cycleLogs = try c.decode([CycleLogEntry].self, forKey: .cycleLogs)
+    }
+}
+
+struct VeldaSavedMealsExportPayload: Codable {
+    let schemaVersion: Int
+    let domain: String
+    let exportedAt: String
+    let savedMeals: [SavedMeal]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, domain, exportedAt, savedMeals
+    }
+
+    init(schemaVersion: Int = 1, domain: String = "saved_meals", exportedAt: String, savedMeals: [SavedMeal]) {
+        self.schemaVersion = schemaVersion
+        self.domain = domain
+        self.exportedAt = exportedAt
+        self.savedMeals = savedMeals
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        domain = try c.decodeIfPresent(String.self, forKey: .domain) ?? "saved_meals"
+        exportedAt = try c.decodeIfPresent(String.self, forKey: .exportedAt) ?? ""
+        savedMeals = try c.decode([SavedMeal].self, forKey: .savedMeals)
+    }
+}
+
+struct VeldaMacrosExportPayload: Codable {
+    let domain: String
+    let exportedAt: String
+    let macroTargets: MacroTargets?
+    let macroLogs: [MacroLogEntry]
+    let savedMeals: [SavedMeal]
+
+    enum CodingKeys: String, CodingKey {
+        case domain, exportedAt, macroTargets, macroLogs, savedMeals
+    }
+
+    init(
+        domain: String = "macros",
+        exportedAt: String,
+        macroTargets: MacroTargets?,
+        macroLogs: [MacroLogEntry],
+        savedMeals: [SavedMeal] = []
+    ) {
+        self.domain = domain
+        self.exportedAt = exportedAt
+        self.macroTargets = macroTargets
+        self.macroLogs = macroLogs
+        self.savedMeals = savedMeals
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        domain = try c.decodeIfPresent(String.self, forKey: .domain) ?? "macros"
+        exportedAt = try c.decodeIfPresent(String.self, forKey: .exportedAt) ?? ""
+        macroTargets = try c.decodeIfPresent(MacroTargets.self, forKey: .macroTargets)
+        macroLogs = try c.decode([MacroLogEntry].self, forKey: .macroLogs)
+        savedMeals = try c.decodeIfPresent([SavedMeal].self, forKey: .savedMeals) ?? []
+    }
 }
 
 struct VeldaRecipeSharePayload: Codable {
@@ -879,6 +1261,7 @@ struct StorageMetrics: Equatable {
     let customExerciseCount: Int
     let totalSetCount: Int
     let macroLogCount: Int
+    var savedMealCount: Int = 0
     let cycleLogCount: Int
     let hasAPIKey: Bool
     let maskedAPIKey: String

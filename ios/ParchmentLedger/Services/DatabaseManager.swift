@@ -127,6 +127,7 @@ final class DatabaseManager: @unchecked Sendable {
         CREATE TABLE IF NOT EXISTS routines (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
+            emblem TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -140,13 +141,17 @@ final class DatabaseManager: @unchecked Sendable {
         );
 
         CREATE TABLE IF NOT EXISTS weekly_schedule (
-            day_of_week INTEGER PRIMARY KEY,
-            routine_id TEXT NOT NULL
+            day_of_week INTEGER NOT NULL,
+            routine_id TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day_of_week, routine_id)
         );
 
         CREATE TABLE IF NOT EXISTS date_schedule (
-            session_date TEXT PRIMARY KEY,
-            routine_id TEXT
+            session_date TEXT NOT NULL,
+            routine_id TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_date, routine_id)
         );
 
         CREATE TABLE IF NOT EXISTS workout_sets (
@@ -238,6 +243,27 @@ final class DatabaseManager: @unchecked Sendable {
         CREATE INDEX IF NOT EXISTS idx_macro_logs_date
             ON macro_logs(log_date DESC, id DESC);
 
+        CREATE TABLE IF NOT EXISTS saved_meals (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_key TEXT NOT NULL UNIQUE,
+            default_meal_slot TEXT NOT NULL DEFAULT 'Lunch',
+            kcal INTEGER NOT NULL DEFAULT 0,
+            protein_g INTEGER NOT NULL DEFAULT 0,
+            carbs_g INTEGER NOT NULL DEFAULT 0,
+            fat_g INTEGER NOT NULL DEFAULT 0,
+            sodium_mg INTEGER NOT NULL DEFAULT 0,
+            sugar_g INTEGER NOT NULL DEFAULT 0,
+            cholesterol_mg INTEGER NOT NULL DEFAULT 0,
+            notes TEXT NOT NULL DEFAULT '',
+            use_count INTEGER NOT NULL DEFAULT 1,
+            last_used_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_saved_meals_recent
+            ON saved_meals(last_used_at DESC, use_count DESC);
+
         CREATE TABLE IF NOT EXISTS cycle_logs (
             log_date TEXT PRIMARY KEY,
             flow TEXT NOT NULL DEFAULT 'none',
@@ -310,6 +336,68 @@ final class DatabaseManager: @unchecked Sendable {
         if !recCols.contains("cholesterol_mg") {
             exec("ALTER TABLE recipes ADD COLUMN cholesterol_mg INTEGER NOT NULL DEFAULT 0;")
         }
+
+        let routineCols = tableColumns("routines")
+        if !routineCols.contains("emblem") {
+            exec("ALTER TABLE routines ADD COLUMN emblem TEXT NOT NULL DEFAULT '';")
+        }
+
+        let weeklyCols = tableColumns("weekly_schedule")
+        if !weeklyCols.isEmpty && !weeklyCols.contains("sort_order") {
+            exec("""
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS weekly_schedule_new (
+                day_of_week INTEGER NOT NULL,
+                routine_id TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day_of_week, routine_id)
+            );
+            INSERT OR IGNORE INTO weekly_schedule_new (day_of_week, routine_id, sort_order)
+            SELECT day_of_week, routine_id, 0 FROM weekly_schedule WHERE routine_id IS NOT NULL AND routine_id != '';
+            DROP TABLE weekly_schedule;
+            ALTER TABLE weekly_schedule_new RENAME TO weekly_schedule;
+            COMMIT;
+            """)
+        }
+
+        let dateCols = tableColumns("date_schedule")
+        if !dateCols.isEmpty && !dateCols.contains("sort_order") {
+            exec("""
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS date_schedule_new (
+                session_date TEXT NOT NULL,
+                routine_id TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_date, routine_id)
+            );
+            INSERT OR IGNORE INTO date_schedule_new (session_date, routine_id, sort_order)
+            SELECT session_date, COALESCE(routine_id, ''), 0 FROM date_schedule;
+            DROP TABLE date_schedule;
+            ALTER TABLE date_schedule_new RENAME TO date_schedule;
+            COMMIT;
+            """)
+        }
+
+        let savedMealCols = tableColumns("saved_meals")
+        if !savedMealCols.isEmpty {
+            if !savedMealCols.contains("sodium_mg") {
+                exec("ALTER TABLE saved_meals ADD COLUMN sodium_mg INTEGER NOT NULL DEFAULT 0;")
+            }
+            if !savedMealCols.contains("sugar_g") {
+                exec("ALTER TABLE saved_meals ADD COLUMN sugar_g INTEGER NOT NULL DEFAULT 0;")
+            }
+            if !savedMealCols.contains("cholesterol_mg") {
+                exec("ALTER TABLE saved_meals ADD COLUMN cholesterol_mg INTEGER NOT NULL DEFAULT 0;")
+            }
+            if !savedMealCols.contains("use_count") {
+                exec("ALTER TABLE saved_meals ADD COLUMN use_count INTEGER NOT NULL DEFAULT 1;")
+            }
+            if !savedMealCols.contains("last_used_at") {
+                exec("ALTER TABLE saved_meals ADD COLUMN last_used_at TEXT NOT NULL DEFAULT '';")
+            }
+        }
+
+        backfillSavedMealsFromHistoryOnce()
     }
 
     private func syncMoveKitManifest() {
@@ -324,8 +412,13 @@ final class DatabaseManager: @unchecked Sendable {
         exec("BEGIN IMMEDIATE;")
         var stmt: OpaquePointer?
         let sql = """
-        INSERT OR IGNORE INTO exercises (id, name, video_filename, muscle_hint, is_custom, created_at)
+        INSERT INTO exercises (id, name, video_filename, muscle_hint, is_custom, created_at)
         VALUES (?, ?, ?, ?, 0, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            video_filename = excluded.video_filename,
+            muscle_hint = excluded.muscle_hint
+        WHERE is_custom = 0
         """
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             for e in entries {
@@ -514,18 +607,20 @@ final class DatabaseManager: @unchecked Sendable {
 
     // MARK: - Public Workouts & Routines API
 
-    private func insertRoutineRowInternal(id: String, title: String, createdAt: String, updatedAt: String) {
+    private func insertRoutineRowInternal(id: String, title: String, emblem: String = "", createdAt: String, updatedAt: String) {
         guard let db = db else { return }
+        let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
         var stmt: OpaquePointer?
         let sql = """
-        INSERT INTO routines (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at
+        INSERT INTO routines (id, title, emblem, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET title = excluded.title, emblem = excluded.emblem, updated_at = excluded.updated_at
         """
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 2, title, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 3, createdAt, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 4, updatedAt, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, cleanEmblem, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, createdAt, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 5, updatedAt, -1, SQLITE_TRANSIENT)
             sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)
@@ -544,65 +639,59 @@ final class DatabaseManager: @unchecked Sendable {
         sqlite3_finalize(stmt)
     }
 
-    private func resolveRoutine(forDate sessionDate: String) -> (routineId: String?, title: String, source: ScheduleSource) {
-        guard let db = db else { return (nil, "Rest Day", .unassigned) }
+    private func resolveRoutines(forDate sessionDate: String) -> (routines: [(id: String, title: String, emblem: String)], source: ScheduleSource) {
+        guard let db = db else { return ([], .unassigned) }
 
-        var dsStmt: OpaquePointer?
-        var hasDateRow = false
-        var overrideId: String? = nil
-        if sqlite3_prepare_v2(db, "SELECT routine_id FROM date_schedule WHERE session_date = ? LIMIT 1", -1, &dsStmt, nil) == SQLITE_OK {
-            sqlite3_bind_text(dsStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
-            if sqlite3_step(dsStmt) == SQLITE_ROW {
-                hasDateRow = true
-                overrideId = sqlite3_column_text(dsStmt, 0).map { String(cString: $0) }
-            }
-        }
-        sqlite3_finalize(dsStmt)
-
-        if hasDateRow {
-            guard let rid = overrideId, !rid.isEmpty else {
-                return (nil, "Rest Day", .clearedDate)
-            }
-            var rStmt: OpaquePointer?
-            var foundTitle: String? = nil
-            if sqlite3_prepare_v2(db, "SELECT title FROM routines WHERE id = ? LIMIT 1", -1, &rStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(rStmt, 1, rid, -1, SQLITE_TRANSIENT)
-                if sqlite3_step(rStmt) == SQLITE_ROW {
-                    foundTitle = sqlite3_column_text(rStmt, 0).map { String(cString: $0) }
+        let dateRowCount = scalarInt("SELECT COUNT(*) FROM date_schedule WHERE session_date = ?", args: [sessionDate])
+        if dateRowCount > 0 {
+            var rows: [(id: String, title: String, emblem: String)] = []
+            var dsStmt: OpaquePointer?
+            let dsSql = """
+            SELECT ds.routine_id, r.title, COALESCE(r.emblem, '')
+            FROM date_schedule ds
+            JOIN routines r ON r.id = ds.routine_id
+            WHERE ds.session_date = ? AND ds.routine_id != ''
+            ORDER BY ds.sort_order ASC, ds.rowid ASC
+            """
+            if sqlite3_prepare_v2(db, dsSql, -1, &dsStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(dsStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                while sqlite3_step(dsStmt) == SQLITE_ROW {
+                    let rid = sqlite3_column_text(dsStmt, 0).map { String(cString: $0) } ?? ""
+                    let title = sqlite3_column_text(dsStmt, 1).map { String(cString: $0) } ?? ""
+                    let emblem = sqlite3_column_text(dsStmt, 2).map { String(cString: $0) } ?? ""
+                    if !rid.isEmpty {
+                        rows.append((rid, title, emblem))
+                    }
                 }
             }
-            sqlite3_finalize(rStmt)
-            if let title = foundTitle {
-                return (rid, title, .dateOverride)
-            }
+            sqlite3_finalize(dsStmt)
+            return rows.isEmpty ? ([], .clearedDate) : (rows, .dateOverride)
         }
 
         let dow = Self.weekdayIndex(Self.dateFromISO(sessionDate))
+        var wsRows: [(id: String, title: String, emblem: String)] = []
         var wsStmt: OpaquePointer?
-        var wsResult: (String, String)? = nil
         let wsSql = """
-        SELECT ws.routine_id, r.title
+        SELECT ws.routine_id, r.title, COALESCE(r.emblem, '')
         FROM weekly_schedule ws
         JOIN routines r ON r.id = ws.routine_id
         WHERE ws.day_of_week = ?
-        LIMIT 1
+        ORDER BY ws.sort_order ASC, ws.rowid ASC
         """
         if sqlite3_prepare_v2(db, wsSql, -1, &wsStmt, nil) == SQLITE_OK {
             sqlite3_bind_int(wsStmt, 1, Int32(dow))
-            if sqlite3_step(wsStmt) == SQLITE_ROW {
+            while sqlite3_step(wsStmt) == SQLITE_ROW {
                 let rid = sqlite3_column_text(wsStmt, 0).map { String(cString: $0) } ?? ""
                 let title = sqlite3_column_text(wsStmt, 1).map { String(cString: $0) } ?? ""
+                let emblem = sqlite3_column_text(wsStmt, 2).map { String(cString: $0) } ?? ""
                 if !rid.isEmpty {
-                    wsResult = (rid, title)
+                    wsRows.append((rid, title, emblem))
                 }
             }
         }
         sqlite3_finalize(wsStmt)
 
-        if let (rid, title) = wsResult {
-            return (rid, title, .weekly)
-        }
-        return (nil, "Rest Day", .unassigned)
+        return wsRows.isEmpty ? ([], .unassigned) : (wsRows, .weekly)
     }
 
     func getWeekDaySlots(containing sessionDate: String, todayDate: String) -> [WeekDaySlot] {
@@ -613,7 +702,8 @@ final class DatabaseManager: @unchecked Sendable {
                 let iso = Self.isoDate(d)
                 let dayNum = cal.component(.day, from: d)
                 let short = (0..<dayNames.count).contains(idx) ? dayNames[idx].uppercased() : "DAY"
-                let hasRoutine = resolveRoutine(forDate: iso).routineId != nil
+                let resolved = resolveRoutines(forDate: iso)
+                let markers = resolved.routines.map { CalendarRoutineMarker(id: $0.id, title: $0.title, emblem: $0.emblem) }
                 let hasSets = scalarInt("SELECT COUNT(*) FROM workout_sets WHERE session_date = ? AND completed = 1", args: [iso]) > 0
                 return WeekDaySlot(
                     isoDate: iso,
@@ -621,8 +711,9 @@ final class DatabaseManager: @unchecked Sendable {
                     dayShort: short,
                     dayNumber: dayNum,
                     isToday: iso == todayDate,
-                    hasRoutine: hasRoutine,
-                    hasLoggedSets: hasSets
+                    hasRoutine: !markers.isEmpty,
+                    hasLoggedSets: hasSets,
+                    routineMarkers: markers
                 )
             }
         }
@@ -640,13 +731,14 @@ final class DatabaseManager: @unchecked Sendable {
             let leadingBlanks = Self.weekdayIndex(firstOfMonth)
             var out: [MonthDaySlot] = []
             for i in 0..<leadingBlanks {
-                out.append(MonthDaySlot(id: "blank_\(i)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false))
+                out.append(MonthDaySlot(id: "blank_\(i)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false, routineMarkers: []))
             }
 
             for day in range {
                 guard let d = cal.date(byAdding: .day, value: day - 1, to: firstOfMonth) else { continue }
                 let iso = Self.isoDate(d)
-                let hasRoutine = resolveRoutine(forDate: iso).routineId != nil
+                let resolved = resolveRoutines(forDate: iso)
+                let markers = resolved.routines.map { CalendarRoutineMarker(id: $0.id, title: $0.title, emblem: $0.emblem) }
                 let hasSets = scalarInt("SELECT COUNT(*) FROM workout_sets WHERE session_date = ? AND completed = 1", args: [iso]) > 0
                 out.append(
                     MonthDaySlot(
@@ -654,8 +746,9 @@ final class DatabaseManager: @unchecked Sendable {
                         isoDate: iso,
                         dayNumber: day,
                         isToday: iso == todayDate,
-                        hasRoutine: hasRoutine,
-                        hasLoggedSets: hasSets
+                        hasRoutine: !markers.isEmpty,
+                        hasLoggedSets: hasSets,
+                        routineMarkers: markers
                     )
                 )
             }
@@ -684,10 +777,8 @@ final class DatabaseManager: @unchecked Sendable {
                 sessionDate: sessionDate,
                 displayDateShort: shortDate,
                 isToday: sessionDate == todayStr,
-                routineId: nil,
                 scheduleSource: .unassigned,
-                title: "Rest Day",
-                exercises: [],
+                routines: [],
                 completionPct: 100,
                 completedExercises: 0,
                 totalExercises: 0,
@@ -695,12 +786,16 @@ final class DatabaseManager: @unchecked Sendable {
             )
         }
 
-        let resolved = resolveRoutine(forDate: sessionDate)
-        var exItems: [RoutineExerciseItem] = []
+        let resolved = resolveRoutines(forDate: sessionDate)
+        var sections: [DayRoutineSection] = []
         var totalSetsDone = 0
-        var completedExercises = 0
+        var totalCompletedExercises = 0
+        var totalExCount = 0
 
-        if let rid = resolved.routineId {
+        for rt in resolved.routines {
+            var exItems: [RoutineExerciseItem] = []
+            var sectionSetsDone = 0
+            var sectionCompletedEx = 0
             var exStmt: OpaquePointer?
             let exSql = """
             SELECT e.id, e.name, e.video_filename, e.muscle_hint, e.is_custom,
@@ -711,7 +806,7 @@ final class DatabaseManager: @unchecked Sendable {
             ORDER BY ri.sort_order ASC, ri.id ASC
             """
             if sqlite3_prepare_v2(db, exSql, -1, &exStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(exStmt, 1, rid, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(exStmt, 1, rt.id, -1, SQLITE_TRANSIENT)
                 while sqlite3_step(exStmt) == SQLITE_ROW {
                     let exId = sqlite3_column_text(exStmt, 0).map { String(cString: $0) } ?? ""
                     let name = sqlite3_column_text(exStmt, 1).map { String(cString: $0) } ?? ""
@@ -724,8 +819,8 @@ final class DatabaseManager: @unchecked Sendable {
 
                     let sets = setsForExercise(sessionDate: sessionDate, exerciseId: exId)
                     let doneHere = sets.filter { $0.completed }.count
-                    totalSetsDone += doneHere
-                    if doneHere > 0 { completedExercises += 1 }
+                    sectionSetsDone += doneHere
+                    if doneHere > 0 { sectionCompletedEx += 1 }
 
                     let (sugReps, sugWeight) = lastCompletedSetSuggestion(exerciseId: exId)
                     let prog = computeProgressionInternal(exerciseId: exId, trackingType: trackingType)
@@ -749,10 +844,25 @@ final class DatabaseManager: @unchecked Sendable {
                 }
             }
             sqlite3_finalize(exStmt)
+
+            totalSetsDone += sectionSetsDone
+            totalCompletedExercises += sectionCompletedEx
+            totalExCount += exItems.count
+
+            sections.append(
+                DayRoutineSection(
+                    id: rt.id,
+                    title: rt.title,
+                    emblem: rt.emblem,
+                    exercises: exItems,
+                    completedExercises: sectionCompletedEx,
+                    totalExercises: exItems.count,
+                    totalSetsDone: sectionSetsDone
+                )
+            )
         }
 
-        let totalEx = exItems.count
-        let pct = totalEx == 0 ? 100 : Int(round((Double(completedExercises) / Double(totalEx)) * 100.0))
+        let pct = totalExCount == 0 ? 100 : Int(round((Double(totalCompletedExercises) / Double(totalExCount)) * 100.0))
         return DayWorkout(
             dayOfWeek: dayOfWeek,
             dayName: dayNames[clampedDow],
@@ -760,13 +870,11 @@ final class DatabaseManager: @unchecked Sendable {
             sessionDate: sessionDate,
             displayDateShort: shortDate,
             isToday: sessionDate == todayStr,
-            routineId: resolved.routineId,
             scheduleSource: resolved.source,
-            title: resolved.title,
-            exercises: exItems,
+            routines: sections,
             completionPct: pct,
-            completedExercises: completedExercises,
-            totalExercises: totalEx,
+            completedExercises: totalCompletedExercises,
+            totalExercises: totalExCount,
             totalSetsDone: totalSetsDone
         )
     }
@@ -938,18 +1046,19 @@ final class DatabaseManager: @unchecked Sendable {
     func listRoutines() -> [RoutineSummary] {
         queue.sync {
             guard let db = db else { return [] }
-            var rows: [(String, String)] = []
+            var rows: [(String, String, String)] = []
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT id, title FROM routines ORDER BY created_at DESC, title ASC", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT id, title, COALESCE(emblem, '') FROM routines ORDER BY created_at DESC, title ASC", -1, &stmt, nil) == SQLITE_OK {
                 while sqlite3_step(stmt) == SQLITE_ROW {
                     let id = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
                     let title = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
-                    if !id.isEmpty { rows.append((id, title)) }
+                    let emblem = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+                    if !id.isEmpty { rows.append((id, title, emblem)) }
                 }
             }
             sqlite3_finalize(stmt)
 
-            return rows.map { (rid, title) in
+            return rows.map { (rid, title, emblem) in
                 var exercises: [Exercise] = []
                 var exStmt: OpaquePointer?
                 let exSql = """
@@ -986,49 +1095,52 @@ final class DatabaseManager: @unchecked Sendable {
                 }
                 sqlite3_finalize(wsStmt)
 
-                return RoutineSummary(id: rid, title: title, exercises: exercises, assignedWeekdays: days)
+                return RoutineSummary(id: rid, title: title, emblem: emblem, exercises: exercises, assignedWeekdays: days)
             }
         }
     }
 
     @discardableResult
-    func createRoutine(title: String, exerciseIds: [String], assignWeekdays: [Int], assignDate: String?) -> String {
+    func createRoutine(title: String, emblem: String = "", exerciseIds: [String], assignWeekdays: [Int], assignDate: String?) -> String {
         queue.sync {
             let rid = "rt_\(UUID().uuidString.prefix(8).lowercased())"
             let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalTitle = cleanTitle.isEmpty ? "Custom Routine" : cleanTitle
+            let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
             let stamp = Self.nowISO()
 
             exec("BEGIN IMMEDIATE;")
-            insertRoutineRowInternal(id: rid, title: finalTitle, createdAt: stamp, updatedAt: stamp)
+            insertRoutineRowInternal(id: rid, title: finalTitle, emblem: cleanEmblem, createdAt: stamp, updatedAt: stamp)
             for (idx, exId) in exerciseIds.enumerated() {
                 insertRoutineItemInternal(routineId: rid, exerciseId: exId, sortOrder: idx)
             }
             for dow in Set(assignWeekdays) where (0...6).contains(dow) {
-                assignWeekdayInternal(routineId: rid, dayOfWeek: dow, clearOverrideForDate: nil)
+                assignWeekdayInternal(routineId: rid, dayOfWeek: dow, syncOverrideForDate: nil)
             }
             if let dateStr = assignDate, !dateStr.isEmpty {
-                assignDateInternal(routineId: rid, sessionDate: dateStr)
+                addRoutineToDateInternal(routineId: rid, sessionDate: dateStr)
             }
             exec("COMMIT;")
             return rid
         }
     }
 
-    func updateRoutine(id: String, title: String, exerciseIds: [String], assignWeekdays: [Int]) {
+    func updateRoutine(id: String, title: String, emblem: String = "", exerciseIds: [String], assignWeekdays: [Int]) {
         queue.sync {
             guard let db = db else { return }
             let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalTitle = cleanTitle.isEmpty ? "Custom Routine" : cleanTitle
+            let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
             let stamp = Self.nowISO()
             let targetDays = Set(assignWeekdays.filter { (0...6).contains($0) })
 
             exec("BEGIN IMMEDIATE;")
             var updStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "UPDATE routines SET title = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "UPDATE routines SET title = ?, emblem = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(updStmt, 1, finalTitle, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(updStmt, 2, stamp, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(updStmt, 3, id, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updStmt, 2, cleanEmblem, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updStmt, 3, stamp, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updStmt, 4, id, -1, SQLITE_TRANSIENT)
                 sqlite3_step(updStmt)
             }
             sqlite3_finalize(updStmt)
@@ -1065,7 +1177,7 @@ final class DatabaseManager: @unchecked Sendable {
             }
 
             for dow in targetDays {
-                assignWeekdayInternal(routineId: id, dayOfWeek: dow, clearOverrideForDate: nil)
+                assignWeekdayInternal(routineId: id, dayOfWeek: dow, syncOverrideForDate: nil)
             }
             exec("COMMIT;")
         }
@@ -1081,6 +1193,34 @@ final class DatabaseManager: @unchecked Sendable {
                 sqlite3_bind_text(stmt, 1, clean, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 2, Self.nowISO(), -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 3, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    func updateRoutineDetails(routineId: String, title: String, emblem: String) {
+        queue.sync {
+            guard let db = db else { return }
+            let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
+            if clean.isEmpty {
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "UPDATE routines SET emblem = ?, updated_at = ? WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(stmt, 1, cleanEmblem, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 2, Self.nowISO(), -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 3, routineId, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(stmt)
+                }
+                sqlite3_finalize(stmt)
+                return
+            }
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE routines SET title = ?, emblem = ?, updated_at = ? WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, clean, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, cleanEmblem, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, Self.nowISO(), -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 4, routineId, -1, SQLITE_TRANSIENT)
                 sqlite3_step(stmt)
             }
             sqlite3_finalize(stmt)
@@ -1121,53 +1261,88 @@ final class DatabaseManager: @unchecked Sendable {
 
     func toggleRoutineWeekday(routineId: String, dayOfWeek: Int, clearOverrideForDate: String? = nil) {
         queue.sync {
-            guard let db = db, (0...6).contains(dayOfWeek) else { return }
-            var currentId: String? = nil
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT routine_id FROM weekly_schedule WHERE day_of_week = ? LIMIT 1", -1, &stmt, nil) == SQLITE_OK {
-                sqlite3_bind_int(stmt, 1, Int32(dayOfWeek))
-                if sqlite3_step(stmt) == SQLITE_ROW, let ptr = sqlite3_column_text(stmt, 0) {
-                    currentId = String(cString: ptr)
-                }
-            }
-            sqlite3_finalize(stmt)
+            guard (0...6).contains(dayOfWeek) else { return }
+            let exists = scalarInt(
+                "SELECT COUNT(*) FROM weekly_schedule WHERE day_of_week = ? AND routine_id = ?",
+                args: ["\(dayOfWeek)", routineId]
+            ) > 0
 
-            if currentId == routineId {
-                var delStmt: OpaquePointer?
-                if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE day_of_week = ?", -1, &delStmt, nil) == SQLITE_OK {
-                    sqlite3_bind_int(delStmt, 1, Int32(dayOfWeek))
-                    sqlite3_step(delStmt)
-                }
-                sqlite3_finalize(delStmt)
+            if exists {
+                removeRoutineFromWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, syncOverrideForDate: clearOverrideForDate)
             } else {
-                assignWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, clearOverrideForDate: clearOverrideForDate)
+                assignWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, syncOverrideForDate: clearOverrideForDate)
             }
         }
     }
 
     func assignRoutineToWeekday(routineId: String, dayOfWeek: Int, clearOverrideForDate: String?) {
         queue.sync {
-            assignWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, clearOverrideForDate: clearOverrideForDate)
+            assignWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, syncOverrideForDate: clearOverrideForDate)
         }
     }
 
-    private func assignWeekdayInternal(routineId: String, dayOfWeek: Int, clearOverrideForDate: String?) {
-        guard let db = db, (0...6).contains(dayOfWeek) else { return }
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO weekly_schedule (day_of_week, routine_id) VALUES (?, ?)", -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(dayOfWeek))
-            sqlite3_bind_text(stmt, 2, routineId, -1, SQLITE_TRANSIENT)
-            sqlite3_step(stmt)
+    func removeRoutineFromWeekday(routineId: String, dayOfWeek: Int, clearOverrideForDate: String?) {
+        queue.sync {
+            removeRoutineFromWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, syncOverrideForDate: clearOverrideForDate)
         }
-        sqlite3_finalize(stmt)
+    }
 
-        if let dateStr = clearOverrideForDate, !dateStr.isEmpty {
-            var rmStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ?", -1, &rmStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(rmStmt, 1, dateStr, -1, SQLITE_TRANSIENT)
-                sqlite3_step(rmStmt)
+    private func assignWeekdayInternal(routineId: String, dayOfWeek: Int, syncOverrideForDate: String?) {
+        guard let db = db, (0...6).contains(dayOfWeek) else { return }
+        let exists = scalarInt(
+            "SELECT COUNT(*) FROM weekly_schedule WHERE day_of_week = ? AND routine_id = ?",
+            args: ["\(dayOfWeek)", routineId]
+        ) > 0
+        if !exists {
+            var nextOrd = 0
+            var ordStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM weekly_schedule WHERE day_of_week = ?", -1, &ordStmt, nil) == SQLITE_OK {
+                sqlite3_bind_int(ordStmt, 1, Int32(dayOfWeek))
+                if sqlite3_step(ordStmt) == SQLITE_ROW {
+                    nextOrd = Int(sqlite3_column_int(ordStmt, 0))
+                }
             }
-            sqlite3_finalize(rmStmt)
+            sqlite3_finalize(ordStmt)
+
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO weekly_schedule (day_of_week, routine_id, sort_order) VALUES (?, ?, ?)", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_int(stmt, 1, Int32(dayOfWeek))
+                sqlite3_bind_text(stmt, 2, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(stmt, 3, Int32(nextOrd))
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+
+        if let dateStr = syncOverrideForDate, !dateStr.isEmpty {
+            let hasDateRows = scalarInt("SELECT COUNT(*) FROM date_schedule WHERE session_date = ?", args: [dateStr]) > 0
+            if hasDateRows {
+                addRoutineToDateInternal(routineId: routineId, sessionDate: dateStr)
+            }
+        }
+    }
+
+    private func removeRoutineFromWeekdayInternal(routineId: String, dayOfWeek: Int, syncOverrideForDate: String?) {
+        guard let db = db, (0...6).contains(dayOfWeek) else { return }
+        var delStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE day_of_week = ? AND routine_id = ?", -1, &delStmt, nil) == SQLITE_OK {
+            sqlite3_bind_int(delStmt, 1, Int32(dayOfWeek))
+            sqlite3_bind_text(delStmt, 2, routineId, -1, SQLITE_TRANSIENT)
+            sqlite3_step(delStmt)
+        }
+        sqlite3_finalize(delStmt)
+
+        if let dateStr = syncOverrideForDate, !dateStr.isEmpty {
+            let hasDateRows = scalarInt("SELECT COUNT(*) FROM date_schedule WHERE session_date = ?", args: [dateStr]) > 0
+            if hasDateRows {
+                var rmStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ? AND routine_id = ?", -1, &rmStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(rmStmt, 1, dateStr, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(rmStmt, 2, routineId, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(rmStmt)
+                }
+                sqlite3_finalize(rmStmt)
+            }
         }
     }
 
@@ -1192,18 +1367,100 @@ final class DatabaseManager: @unchecked Sendable {
         }
     }
 
-    func assignRoutineToDate(routineId: String, sessionDate: String) {
-        queue.sync {
-            assignDateInternal(routineId: routineId, sessionDate: sessionDate)
+    private func materializeWeeklyIntoDateIfNeeded(sessionDate: String) {
+        guard let db = db else { return }
+        let existingCount = scalarInt("SELECT COUNT(*) FROM date_schedule WHERE session_date = ?", args: [sessionDate])
+        guard existingCount == 0 else { return }
+
+        let dow = Self.weekdayIndex(Self.dateFromISO(sessionDate))
+        var weeklyRows: [(String, Int)] = []
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT routine_id, sort_order FROM weekly_schedule WHERE day_of_week = ? ORDER BY sort_order ASC, rowid ASC", -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int(stmt, 1, Int32(dow))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let rid = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+                let ord = Int(sqlite3_column_int(stmt, 1))
+                if !rid.isEmpty {
+                    weeklyRows.append((rid, ord))
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        for (rid, ord) in weeklyRows {
+            var insStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, ?, ?)", -1, &insStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(insStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(insStmt, 2, rid, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(insStmt, 3, Int32(ord))
+                sqlite3_step(insStmt)
+            }
+            sqlite3_finalize(insStmt)
         }
     }
 
-    private func assignDateInternal(routineId: String, sessionDate: String) {
-        guard let db = db else { return }
+    func assignRoutineToDate(routineId: String, sessionDate: String) {
+        queue.sync {
+            addRoutineToDateInternal(routineId: routineId, sessionDate: sessionDate)
+        }
+    }
+
+    func removeRoutineFromDate(routineId: String, sessionDate: String) {
+        queue.sync {
+            guard let db = db else { return }
+            materializeWeeklyIntoDateIfNeeded(sessionDate: sessionDate)
+            var delStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ? AND routine_id = ?", -1, &delStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(delStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(delStmt, 2, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_step(delStmt)
+            }
+            sqlite3_finalize(delStmt)
+
+            let remaining = scalarInt("SELECT COUNT(*) FROM date_schedule WHERE session_date = ? AND routine_id != ''", args: [sessionDate])
+            if remaining == 0 {
+                var clStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, '', 0)", -1, &clStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(clStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(clStmt)
+                }
+                sqlite3_finalize(clStmt)
+            }
+        }
+    }
+
+    private func addRoutineToDateInternal(routineId: String, sessionDate: String) {
+        guard let db = db, !routineId.isEmpty else { return }
+        materializeWeeklyIntoDateIfNeeded(sessionDate: sessionDate)
+
+        var clrStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ? AND routine_id = ''", -1, &clrStmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(clrStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+            sqlite3_step(clrStmt)
+        }
+        sqlite3_finalize(clrStmt)
+
+        let exists = scalarInt(
+            "SELECT COUNT(*) FROM date_schedule WHERE session_date = ? AND routine_id = ?",
+            args: [sessionDate, routineId]
+        ) > 0
+        guard !exists else { return }
+
+        var nextOrd = 0
+        var ordStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM date_schedule WHERE session_date = ?", -1, &ordStmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(ordStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+            if sqlite3_step(ordStmt) == SQLITE_ROW {
+                nextOrd = Int(sqlite3_column_int(ordStmt, 0))
+            }
+        }
+        sqlite3_finalize(ordStmt)
+
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id) VALUES (?, ?)", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, ?, ?)", -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 2, routineId, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 3, Int32(nextOrd))
             sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)
@@ -1212,8 +1469,15 @@ final class DatabaseManager: @unchecked Sendable {
     func clearDateSchedule(sessionDate: String) {
         queue.sync {
             guard let db = db else { return }
+            var delStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ?", -1, &delStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(delStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                sqlite3_step(delStmt)
+            }
+            sqlite3_finalize(delStmt)
+
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id) VALUES (?, NULL)", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, '', 0)", -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(stmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
                 sqlite3_step(stmt)
             }
@@ -1492,7 +1756,12 @@ final class DatabaseManager: @unchecked Sendable {
 
     // MARK: - Fuzzy Exercise Search (588 MoveKit + Custom)
 
-    func fuzzySearchExercises(query: String, limit: Int = 25) -> [Exercise] {
+    func fuzzySearchExercises(
+        query: String,
+        region: MuscleRegion = .all,
+        subGroup: MuscleSubGroup? = nil,
+        limit: Int = 25
+    ) -> [Exercise] {
         queue.sync {
             guard let db = db else { return [] }
             var all: [Exercise] = []
@@ -1517,9 +1786,13 @@ final class DatabaseManager: @unchecked Sendable {
             }
             sqlite3_finalize(stmt)
 
+            let filtered = (region == .all && subGroup == nil)
+                ? all
+                : all.filter { region.matches(muscleHint: $0.muscleHint, subGroup: subGroup) }
+
             let qNorm = Self.normText(query)
             if qNorm.isEmpty {
-                return Array(all.prefix(limit))
+                return Array(filtered.prefix(limit))
             }
 
             let aliases: [String: String] = [
@@ -1530,11 +1803,35 @@ final class DatabaseManager: @unchecked Sendable {
                 "bb": "barbell",
                 "kb": "kettlebell",
                 "bw": "bodyweight",
-                "bicep": "curl arms",
-                "biceps": "curl arms",
-                "tricep": "tricep pushdown skullcrusher",
-                "triceps": "tricep pushdown skullcrusher",
-                "abs": "core abdominal",
+                "bi": "biceps",
+                "bis": "biceps",
+                "bicep": "biceps curl",
+                "biceps": "biceps curl",
+                "tri": "triceps",
+                "tris": "triceps",
+                "tricep": "triceps pushdown skullcrusher",
+                "triceps": "triceps pushdown skullcrusher",
+                "delt": "delts",
+                "delts": "delts",
+                "pec": "chest",
+                "pecs": "chest",
+                "quad": "quads",
+                "quads": "quads",
+                "ham": "hamstrings",
+                "hams": "hamstrings",
+                "glute": "glutes",
+                "glutes": "glutes",
+                "lat": "lats",
+                "lats": "lats",
+                "calf": "calves",
+                "calves": "calves",
+                "trap": "traps",
+                "traps": "traps",
+                "forearm": "forearms",
+                "forearms": "forearms",
+                "oblique": "obliques",
+                "obliques": "obliques",
+                "abs": "abs core abdominal",
                 "pullup": "pull up",
                 "pullups": "pull up",
                 "pushup": "push up",
@@ -1555,7 +1852,7 @@ final class DatabaseManager: @unchecked Sendable {
             let qCompact = qTokens.joined()
 
             var scored: [(score: Double, item: Exercise)] = []
-            for ex in all {
+            for ex in filtered {
                 let cNorm = Self.normText(ex.name)
                 let cTokens = cNorm.split(separator: " ").map { Self.singularize(String($0)) }
                 let cCompact = cTokens.joined()
@@ -2131,6 +2428,7 @@ final class DatabaseManager: @unchecked Sendable {
             let customEx = scalarInt("SELECT COUNT(*) FROM exercises WHERE is_custom = 1")
             let totalSets = scalarInt("SELECT COUNT(*) FROM workout_sets")
             let macroLogs = scalarInt("SELECT COUNT(*) FROM macro_logs")
+            let savedMeals = scalarInt("SELECT COUNT(*) FROM saved_meals")
             let cycleLogs = scalarInt("SELECT COUNT(*) FROM cycle_logs")
 
             let ttl = 60
@@ -2160,6 +2458,7 @@ final class DatabaseManager: @unchecked Sendable {
                 customExerciseCount: customEx,
                 totalSetCount: totalSets,
                 macroLogCount: macroLogs,
+                savedMealCount: savedMeals,
                 cycleLogCount: cycleLogs,
                 hasAPIKey: !rawKey.isEmpty,
                 maskedAPIKey: masked,
@@ -2711,10 +3010,12 @@ final class DatabaseManager: @unchecked Sendable {
         sugarG: Int = 0,
         cholesterolMg: Int = 0,
         recipeId: String? = nil,
-        notes: String = ""
+        notes: String = "",
+        saveAsReusableMeal: Bool = true
     ) -> Int64 {
         queue.sync {
-            insertMacroLogRaw(
+            let stamp = Self.nowISO()
+            let rowId = insertMacroLogRaw(
                 logDate: logDate,
                 mealSlot: mealSlot,
                 name: name,
@@ -2728,9 +3029,387 @@ final class DatabaseManager: @unchecked Sendable {
                 cholesterolMg: cholesterolMg,
                 recipeId: recipeId,
                 notes: notes,
-                createdAt: Self.nowISO()
+                createdAt: stamp
+            )
+            if saveAsReusableMeal && (recipeId?.isEmpty ?? true) {
+                upsertSavedMealInternal(
+                    name: name,
+                    defaultMealSlot: mealSlot,
+                    kcal: kcal,
+                    proteinG: proteinG,
+                    carbsG: carbsG,
+                    fatG: fatG,
+                    sodiumMg: sodiumMg,
+                    sugarG: sugarG,
+                    cholesterolMg: cholesterolMg,
+                    notes: notes,
+                    incrementUsage: true,
+                    lastUsedAt: stamp,
+                    createdAt: stamp
+                )
+            }
+            return rowId
+        }
+    }
+
+    // MARK: - Reusable Saved Meals API
+
+    func listSavedMeals(query: String = "", mealSlot: String? = nil, limit: Int = 200) -> [SavedMeal] {
+        queue.sync {
+            listSavedMealsInternal(query: query, mealSlot: mealSlot, limit: limit)
+        }
+    }
+
+    private func listSavedMealsInternal(query: String = "", mealSlot: String? = nil, limit: Int = 5000) -> [SavedMeal] {
+        guard let db = db else { return [] }
+        var all: [SavedMeal] = []
+        var stmt: OpaquePointer?
+        let sql = """
+        SELECT id, name, default_meal_slot, kcal, protein_g, carbs_g, fat_g,
+               COALESCE(sodium_mg, 0), COALESCE(sugar_g, 0), COALESCE(cholesterol_mg, 0),
+               notes, COALESCE(use_count, 1), last_used_at, created_at
+        FROM saved_meals
+        ORDER BY last_used_at DESC, use_count DESC, name ASC
+        LIMIT ?
+        """
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int(stmt, 1, Int32(max(1, limit)))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                all.append(Self.readSavedMealRow(stmt!))
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        let cleanQ = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanSlot = mealSlot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return all.filter { meal in
+            if !cleanSlot.isEmpty && cleanSlot.caseInsensitiveCompare("All") != .orderedSame {
+                if meal.defaultMealSlot.caseInsensitiveCompare(cleanSlot) != .orderedSame {
+                    return false
+                }
+            }
+            if !cleanQ.isEmpty {
+                let hay = "\(meal.name.lowercased()) \(meal.notes.lowercased())"
+                if !hay.contains(cleanQ) {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    func recordSavedMealUsage(id: String) {
+        queue.sync {
+            guard let db = db, !id.isEmpty else { return }
+            var stmt: OpaquePointer?
+            let sql = "UPDATE saved_meals SET use_count = use_count + 1, last_used_at = ? WHERE id = ?"
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, Self.nowISO(), -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    func deleteSavedMeal(id: String) {
+        queue.sync {
+            guard let db = db else { return }
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM saved_meals WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    @discardableResult
+    func importSavedMeals(_ meals: [SavedMeal]) -> Int {
+        queue.sync {
+            guard !meals.isEmpty else { return 0 }
+            exec("BEGIN IMMEDIATE;")
+            var count = 0
+            for m in meals {
+                if !m.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    upsertSavedMealInternal(
+                        id: m.id,
+                        name: m.name,
+                        defaultMealSlot: m.defaultMealSlot,
+                        kcal: m.kcal,
+                        proteinG: m.proteinG,
+                        carbsG: m.carbsG,
+                        fatG: m.fatG,
+                        sodiumMg: m.sodiumMg,
+                        sugarG: m.sugarG,
+                        cholesterolMg: m.cholesterolMg,
+                        notes: m.notes,
+                        incrementUsage: false,
+                        useCountOverride: m.useCount,
+                        lastUsedAt: m.lastUsedAt,
+                        createdAt: m.createdAt
+                    )
+                    count += 1
+                }
+            }
+            exec("COMMIT;")
+            return count
+        }
+    }
+
+    func importMacrosBundle(targets: MacroTargets?, logs: [MacroLogEntry], savedMeals: [SavedMeal]) {
+        queue.sync {
+            guard let db = db else { return }
+            let stamp = Self.nowISO()
+            exec("BEGIN IMMEDIATE;")
+            if let targets {
+                var tStmt: OpaquePointer?
+                let tSql = """
+                INSERT INTO macro_targets (id, kcal, protein_g, carbs_g, fat_g, sodium_mg, sugar_g, cholesterol_mg)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kcal = excluded.kcal, protein_g = excluded.protein_g, carbs_g = excluded.carbs_g, fat_g = excluded.fat_g,
+                    sodium_mg = excluded.sodium_mg, sugar_g = excluded.sugar_g, cholesterol_mg = excluded.cholesterol_mg
+                """
+                if sqlite3_prepare_v2(db, tSql, -1, &tStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_int(tStmt, 1, Int32(targets.kcal))
+                    sqlite3_bind_int(tStmt, 2, Int32(targets.proteinG))
+                    sqlite3_bind_int(tStmt, 3, Int32(targets.carbsG))
+                    sqlite3_bind_int(tStmt, 4, Int32(targets.fatG))
+                    sqlite3_bind_int(tStmt, 5, Int32(targets.sodiumMg))
+                    sqlite3_bind_int(tStmt, 6, Int32(targets.sugarG))
+                    sqlite3_bind_int(tStmt, 7, Int32(targets.cholesterolMg))
+                    sqlite3_step(tStmt)
+                }
+                sqlite3_finalize(tStmt)
+            }
+
+            for ml in logs {
+                let exists = scalarInt(
+                    "SELECT COUNT(*) FROM macro_logs WHERE log_date = ? AND name = ? AND kcal = ? AND created_at = ?",
+                    args: [ml.logDate, ml.name, "\(ml.kcal)", ml.createdAt]
+                ) > 0
+                if !exists {
+                    _ = insertMacroLogRaw(
+                        logDate: ml.logDate,
+                        mealSlot: ml.mealSlot,
+                        name: ml.name,
+                        servings: ml.servings,
+                        kcal: ml.kcal,
+                        proteinG: ml.proteinG,
+                        carbsG: ml.carbsG,
+                        fatG: ml.fatG,
+                        sodiumMg: ml.sodiumMg,
+                        sugarG: ml.sugarG,
+                        cholesterolMg: ml.cholesterolMg,
+                        recipeId: ml.recipeId,
+                        notes: ml.notes,
+                        createdAt: ml.createdAt.isEmpty ? stamp : ml.createdAt
+                    )
+                }
+            }
+
+            if !savedMeals.isEmpty {
+                for m in savedMeals {
+                    upsertSavedMealInternal(
+                        id: m.id,
+                        name: m.name,
+                        defaultMealSlot: m.defaultMealSlot,
+                        kcal: m.kcal,
+                        proteinG: m.proteinG,
+                        carbsG: m.carbsG,
+                        fatG: m.fatG,
+                        sodiumMg: m.sodiumMg,
+                        sugarG: m.sugarG,
+                        cholesterolMg: m.cholesterolMg,
+                        notes: m.notes,
+                        incrementUsage: false,
+                        useCountOverride: m.useCount,
+                        lastUsedAt: m.lastUsedAt,
+                        createdAt: m.createdAt
+                    )
+                }
+            } else if !logs.isEmpty {
+                backfillSavedMealsFromMacroLogsInternal(logs)
+            }
+            exec("COMMIT;")
+        }
+    }
+
+    private func upsertSavedMealInternal(
+        id: String? = nil,
+        name: String,
+        defaultMealSlot: String,
+        kcal: Int,
+        proteinG: Int,
+        carbsG: Int,
+        fatG: Int,
+        sodiumMg: Int,
+        sugarG: Int,
+        cholesterolMg: Int,
+        notes: String,
+        incrementUsage: Bool,
+        useCountOverride: Int? = nil,
+        lastUsedAt: String? = nil,
+        createdAt: String? = nil
+    ) {
+        guard let db = db else { return }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normKey = Self.normText(cleanName)
+        guard !cleanName.isEmpty, !normKey.isEmpty else { return }
+        let cleanSlot = defaultMealSlot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Lunch" : defaultMealSlot
+        let cleanNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = Self.nowISO()
+        let incomingLast = (lastUsedAt?.isEmpty == false) ? lastUsedAt! : now
+        let incomingCreated = (createdAt?.isEmpty == false) ? createdAt! : incomingLast
+
+        var existingId: String? = nil
+        var existingCount = 0
+        var existingLast = ""
+        var qStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT id, COALESCE(use_count, 1), last_used_at FROM saved_meals WHERE normalized_key = ? LIMIT 1", -1, &qStmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(qStmt, 1, normKey, -1, SQLITE_TRANSIENT)
+            if sqlite3_step(qStmt) == SQLITE_ROW {
+                existingId = sqlite3_column_text(qStmt, 0).map { String(cString: $0) }
+                existingCount = Int(sqlite3_column_int(qStmt, 1))
+                existingLast = sqlite3_column_text(qStmt, 2).map { String(cString: $0) } ?? ""
+            }
+        }
+        sqlite3_finalize(qStmt)
+
+        if let eid = existingId {
+            let nextCount: Int
+            if let override = useCountOverride {
+                nextCount = max(existingCount, override)
+            } else {
+                nextCount = existingCount + (incrementUsage ? 1 : 0)
+            }
+            let nextLast = max(existingLast, incomingLast)
+            var uStmt: OpaquePointer?
+            let uSql = """
+            UPDATE saved_meals
+            SET name = ?, default_meal_slot = ?, kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ?,
+                sodium_mg = ?, sugar_g = ?, cholesterol_mg = ?, notes = ?, use_count = ?, last_used_at = ?
+            WHERE id = ?
+            """
+            if sqlite3_prepare_v2(db, uSql, -1, &uStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(uStmt, 1, cleanName, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(uStmt, 2, cleanSlot, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(uStmt, 3, Int32(max(0, kcal)))
+                sqlite3_bind_int(uStmt, 4, Int32(max(0, proteinG)))
+                sqlite3_bind_int(uStmt, 5, Int32(max(0, carbsG)))
+                sqlite3_bind_int(uStmt, 6, Int32(max(0, fatG)))
+                sqlite3_bind_int(uStmt, 7, Int32(max(0, sodiumMg)))
+                sqlite3_bind_int(uStmt, 8, Int32(max(0, sugarG)))
+                sqlite3_bind_int(uStmt, 9, Int32(max(0, cholesterolMg)))
+                sqlite3_bind_text(uStmt, 10, cleanNotes, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(uStmt, 11, Int32(max(1, nextCount)))
+                sqlite3_bind_text(uStmt, 12, nextLast, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(uStmt, 13, eid, -1, SQLITE_TRANSIENT)
+                sqlite3_step(uStmt)
+            }
+            sqlite3_finalize(uStmt)
+        } else {
+            let candidateId = (id?.isEmpty == false) ? id! : "meal_\(UUID().uuidString.prefix(8).lowercased())"
+            let idConflict = scalarInt("SELECT COUNT(*) FROM saved_meals WHERE id = ?", args: [candidateId]) > 0
+            let finalId = idConflict ? "meal_\(UUID().uuidString.prefix(8).lowercased())" : candidateId
+            let finalCount = max(1, useCountOverride ?? 1)
+            var iStmt: OpaquePointer?
+            let iSql = """
+            INSERT INTO saved_meals (
+                id, name, normalized_key, default_meal_slot, kcal, protein_g, carbs_g, fat_g,
+                sodium_mg, sugar_g, cholesterol_mg, notes, use_count, last_used_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            if sqlite3_prepare_v2(db, iSql, -1, &iStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(iStmt, 1, finalId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 2, cleanName, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 3, normKey, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 4, cleanSlot, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(iStmt, 5, Int32(max(0, kcal)))
+                sqlite3_bind_int(iStmt, 6, Int32(max(0, proteinG)))
+                sqlite3_bind_int(iStmt, 7, Int32(max(0, carbsG)))
+                sqlite3_bind_int(iStmt, 8, Int32(max(0, fatG)))
+                sqlite3_bind_int(iStmt, 9, Int32(max(0, sodiumMg)))
+                sqlite3_bind_int(iStmt, 10, Int32(max(0, sugarG)))
+                sqlite3_bind_int(iStmt, 11, Int32(max(0, cholesterolMg)))
+                sqlite3_bind_text(iStmt, 12, cleanNotes, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(iStmt, 13, Int32(finalCount))
+                sqlite3_bind_text(iStmt, 14, incomingLast, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(iStmt, 15, incomingCreated, -1, SQLITE_TRANSIENT)
+                sqlite3_step(iStmt)
+            }
+            sqlite3_finalize(iStmt)
+        }
+    }
+
+    private func backfillSavedMealsFromHistoryOnce() {
+        if getSettingInternal("saved_meals_backfilled_v1", default: "") == "1" {
+            return
+        }
+        let history = listAllMacroLogsInternal()
+        if !history.isEmpty {
+            exec("BEGIN IMMEDIATE;")
+            backfillSavedMealsFromMacroLogsInternal(history)
+            exec("COMMIT;")
+        }
+        setSettingInternal(key: "saved_meals_backfilled_v1", value: "1")
+    }
+
+    private func backfillSavedMealsFromMacroLogsInternal(_ logs: [MacroLogEntry]) {
+        let nonRecipe = logs.filter { $0.recipeId?.isEmpty ?? true }
+        var grouped: [String: [MacroLogEntry]] = [:]
+        for entry in nonRecipe {
+            let key = Self.normText(entry.name)
+            guard !key.isEmpty else { continue }
+            grouped[key, default: []].append(entry)
+        }
+        for (_, entries) in grouped {
+            let sorted = entries.sorted { a, b in
+                if a.logDate != b.logDate { return a.logDate > b.logDate }
+                return a.id > b.id
+            }
+            guard let latest = sorted.first else { continue }
+            let oldest = sorted.last ?? latest
+            let lastStamp = latest.createdAt.isEmpty ? "\(latest.logDate)T12:00:00Z" : latest.createdAt
+            let firstStamp = oldest.createdAt.isEmpty ? lastStamp : oldest.createdAt
+            upsertSavedMealInternal(
+                name: latest.name,
+                defaultMealSlot: latest.mealSlot,
+                kcal: latest.kcal,
+                proteinG: latest.proteinG,
+                carbsG: latest.carbsG,
+                fatG: latest.fatG,
+                sodiumMg: latest.sodiumMg,
+                sugarG: latest.sugarG,
+                cholesterolMg: latest.cholesterolMg,
+                notes: latest.notes,
+                incrementUsage: false,
+                useCountOverride: sorted.count,
+                lastUsedAt: lastStamp,
+                createdAt: firstStamp
             )
         }
+    }
+
+    private static func readSavedMealRow(_ stmt: OpaquePointer) -> SavedMeal {
+        SavedMeal(
+            id: sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "",
+            name: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+            defaultMealSlot: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "Lunch",
+            kcal: Int(sqlite3_column_int(stmt, 3)),
+            proteinG: Int(sqlite3_column_int(stmt, 4)),
+            carbsG: Int(sqlite3_column_int(stmt, 5)),
+            fatG: Int(sqlite3_column_int(stmt, 6)),
+            sodiumMg: Int(sqlite3_column_int(stmt, 7)),
+            sugarG: Int(sqlite3_column_int(stmt, 8)),
+            cholesterolMg: Int(sqlite3_column_int(stmt, 9)),
+            notes: sqlite3_column_text(stmt, 10).map { String(cString: $0) } ?? "",
+            useCount: Int(sqlite3_column_int(stmt, 11)),
+            lastUsedAt: sqlite3_column_text(stmt, 12).map { String(cString: $0) } ?? "",
+            createdAt: sqlite3_column_text(stmt, 13).map { String(cString: $0) } ?? ""
+        )
     }
 
     @discardableResult
@@ -3287,6 +3966,7 @@ final class DatabaseManager: @unchecked Sendable {
         let weightList = listWeightLogs(displayUnit: unit, limit: 5000)
         let macroTargets = getMacroTargets()
         let macroLogs = listAllMacroLogs()
+        let savedMeals = listSavedMeals(limit: 5000)
         let recs = listRecipes()
         let cycleLogs = listAllCycleLogs()
         let sets = listAllWorkoutSets()
@@ -3294,10 +3974,11 @@ final class DatabaseManager: @unchecked Sendable {
             guard let db = db else { return [] }
             var list: [ExportDateScheduleEntry] = []
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT session_date, routine_id FROM date_schedule ORDER BY session_date DESC", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT session_date, routine_id FROM date_schedule ORDER BY session_date DESC, sort_order ASC, rowid ASC", -1, &stmt, nil) == SQLITE_OK {
                 while sqlite3_step(stmt) == SQLITE_ROW {
                     let sDate = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
-                    let rId = sqlite3_column_text(stmt, 1).map { String(cString: $0) }
+                    let rawRId = sqlite3_column_text(stmt, 1).map { String(cString: $0) }
+                    let rId = (rawRId?.isEmpty ?? true) ? nil : rawRId
                     if !sDate.isEmpty {
                         list.append(ExportDateScheduleEntry(sessionDate: sDate, routineId: rId))
                     }
@@ -3308,7 +3989,7 @@ final class DatabaseManager: @unchecked Sendable {
         }
 
         return VeldaFullSnapshot(
-            schemaVersion: 2,
+            schemaVersion: 3,
             appName: "Velda Fitness",
             exportedAt: Self.nowISO(),
             weightUnit: unit,
@@ -3320,6 +4001,7 @@ final class DatabaseManager: @unchecked Sendable {
             weightLogs: weightList,
             macroTargets: macroTargets,
             macroLogs: macroLogs,
+            savedMeals: savedMeals,
             recipes: recs.saved + recs.discover,
             cycleLogs: cycleLogs
         )
@@ -3339,6 +4021,7 @@ final class DatabaseManager: @unchecked Sendable {
                 exec("DELETE FROM workout_sets;")
                 exec("DELETE FROM weight_logs;")
                 exec("DELETE FROM macro_logs;")
+                exec("DELETE FROM saved_meals;")
                 exec("DELETE FROM cycle_logs;")
                 exec("DELETE FROM recipes;")
                 exec("DELETE FROM exercises WHERE is_custom = 1;")
@@ -3372,7 +4055,7 @@ final class DatabaseManager: @unchecked Sendable {
             }
 
             for rt in snapshot.routines {
-                insertRoutineRowInternal(id: rt.id, title: rt.title, createdAt: stamp, updatedAt: stamp)
+                insertRoutineRowInternal(id: rt.id, title: rt.title, emblem: rt.emblem, createdAt: stamp, updatedAt: stamp)
                 var delStmt: OpaquePointer?
                 if sqlite3_prepare_v2(db, "DELETE FROM routine_items WHERE routine_id = ?", -1, &delStmt, nil) == SQLITE_OK {
                     sqlite3_bind_text(delStmt, 1, rt.id, -1, SQLITE_TRANSIENT)
@@ -3384,20 +4067,45 @@ final class DatabaseManager: @unchecked Sendable {
                     insertRoutineItemInternal(routineId: rt.id, exerciseId: ex.id, sortOrder: idx)
                 }
                 for dow in rt.assignedWeekdays where (0...6).contains(dow) {
-                    assignWeekdayInternal(routineId: rt.id, dayOfWeek: dow, clearOverrideForDate: nil)
+                    assignWeekdayInternal(routineId: rt.id, dayOfWeek: dow, syncOverrideForDate: nil)
                 }
             }
 
-            for ds in snapshot.dateSchedules {
-                if let rid = ds.routineId, !rid.isEmpty {
-                    assignDateInternal(routineId: rid, sessionDate: ds.sessionDate)
-                } else {
+            let groupedSchedules = Dictionary(grouping: snapshot.dateSchedules, by: \.sessionDate)
+            for (sessionDate, entries) in groupedSchedules where !sessionDate.isEmpty {
+                let validIds = entries.compactMap { $0.routineId }.filter { !$0.isEmpty }
+                if validIds.isEmpty {
+                    var delStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ?", -1, &delStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_text(delStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                        sqlite3_step(delStmt)
+                    }
+                    sqlite3_finalize(delStmt)
+
                     var stmt: OpaquePointer?
-                    if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id) VALUES (?, NULL)", -1, &stmt, nil) == SQLITE_OK {
-                        sqlite3_bind_text(stmt, 1, ds.sessionDate, -1, SQLITE_TRANSIENT)
+                    if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, '', 0)", -1, &stmt, nil) == SQLITE_OK {
+                        sqlite3_bind_text(stmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
                         sqlite3_step(stmt)
                     }
                     sqlite3_finalize(stmt)
+                } else {
+                    var clrStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ? AND routine_id = ''", -1, &clrStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_text(clrStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                        sqlite3_step(clrStmt)
+                    }
+                    sqlite3_finalize(clrStmt)
+
+                    for (idx, rid) in validIds.enumerated() {
+                        var stmt: OpaquePointer?
+                        if sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, ?, ?)", -1, &stmt, nil) == SQLITE_OK {
+                            sqlite3_bind_text(stmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                            sqlite3_bind_text(stmt, 2, rid, -1, SQLITE_TRANSIENT)
+                            sqlite3_bind_int(stmt, 3, Int32(idx))
+                            sqlite3_step(stmt)
+                        }
+                        sqlite3_finalize(stmt)
+                    }
                 }
             }
 
@@ -3486,6 +4194,30 @@ final class DatabaseManager: @unchecked Sendable {
                 }
             }
 
+            if !snapshot.savedMeals.isEmpty {
+                for m in snapshot.savedMeals {
+                    upsertSavedMealInternal(
+                        id: m.id,
+                        name: m.name,
+                        defaultMealSlot: m.defaultMealSlot,
+                        kcal: m.kcal,
+                        proteinG: m.proteinG,
+                        carbsG: m.carbsG,
+                        fatG: m.fatG,
+                        sodiumMg: m.sodiumMg,
+                        sugarG: m.sugarG,
+                        cholesterolMg: m.cholesterolMg,
+                        notes: m.notes,
+                        incrementUsage: false,
+                        useCountOverride: m.useCount,
+                        lastUsedAt: m.lastUsedAt,
+                        createdAt: m.createdAt
+                    )
+                }
+            } else if !snapshot.macroLogs.isEmpty {
+                backfillSavedMealsFromMacroLogsInternal(snapshot.macroLogs)
+            }
+
             for rec in snapshot.recipes {
                 let exists = scalarInt("SELECT COUNT(*) FROM recipes WHERE id = ?", args: [rec.id]) > 0
                 if !exists || !merge {
@@ -3532,7 +4264,7 @@ final class DatabaseManager: @unchecked Sendable {
         queue.sync {
             guard let db = db else { return }
             exec("BEGIN IMMEDIATE;")
-            insertRoutineRowInternal(id: newRid, title: routine.title, createdAt: stamp, updatedAt: stamp)
+            insertRoutineRowInternal(id: newRid, title: routine.title, emblem: routine.emblem, createdAt: stamp, updatedAt: stamp)
             for (idx, ex) in routine.exercises.enumerated() {
                 if ex.isCustom {
                     let exists = scalarInt("SELECT COUNT(*) FROM exercises WHERE id = ?", args: [ex.id]) > 0
@@ -3621,6 +4353,7 @@ final class DatabaseManager: @unchecked Sendable {
             exec("DELETE FROM workout_sets;")
             exec("DELETE FROM weight_logs;")
             exec("DELETE FROM macro_logs;")
+            exec("DELETE FROM saved_meals;")
             exec("DELETE FROM cycle_logs;")
             exec("DELETE FROM recipes;")
             exec("DELETE FROM exercises WHERE is_custom = 1;")

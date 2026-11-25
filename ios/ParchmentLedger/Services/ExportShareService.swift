@@ -10,6 +10,8 @@ enum ExportImportResult {
     case fullSnapshot(VeldaFullSnapshot)
     case singleRoutine(RoutineSummary)
     case singleRecipe(Recipe)
+    case savedMeals([SavedMeal])
+    case macrosBundle(MacroTargets?, [MacroLogEntry], [SavedMeal])
 }
 
 enum ExportImportError: LocalizedError {
@@ -114,6 +116,7 @@ final class ExportShareService: @unchecked Sendable {
             .compactMap { (0..<weekdayNames.count).contains($0) ? weekdayNames[$0] : nil }
             .joined(separator: ", ")
 
+        let headingTitle = routine.emblem.isEmpty ? routine.title : "\(routine.emblem) \(routine.title)"
         let content: String
         switch format {
         case .json:
@@ -127,7 +130,7 @@ final class ExportShareService: @unchecked Sendable {
 
         case .markdown:
             var lines: [String] = [
-                "# \(routine.title)",
+                "# \(headingTitle)",
                 "",
                 "- **Movements:** \(routine.exercises.count)",
                 "- **Weekly Days:** \(daysLabel.isEmpty ? "Unassigned" : daysLabel)",
@@ -147,8 +150,8 @@ final class ExportShareService: @unchecked Sendable {
 
         case .text:
             var lines: [String] = [
-                routine.title.uppercased(),
-                String(repeating: "-", count: min(48, max(12, routine.title.count))),
+                headingTitle.uppercased(),
+                String(repeating: "-", count: min(48, max(12, headingTitle.count))),
                 "Movements: \(routine.exercises.count) | Schedule: \(daysLabel.isEmpty ? "Unassigned" : daysLabel)",
                 "",
             ]
@@ -201,8 +204,22 @@ final class ExportShareService: @unchecked Sendable {
             struct Box: Codable { let domain: String; let exportedAt: String; let weightUnit: String; let weightLogs: [WeightLogEntry] }
             return try encodePrettyJSON(Box(domain: "body_weight", exportedAt: snapshot.exportedAt, weightUnit: snapshot.weightUnit, weightLogs: snapshot.weightLogs))
         case .macros:
-            struct Box: Codable { let domain: String; let exportedAt: String; let macroTargets: MacroTargets; let macroLogs: [MacroLogEntry] }
-            return try encodePrettyJSON(Box(domain: "macros", exportedAt: snapshot.exportedAt, macroTargets: snapshot.macroTargets, macroLogs: snapshot.macroLogs))
+            let payload = VeldaMacrosExportPayload(
+                domain: "macros",
+                exportedAt: snapshot.exportedAt,
+                macroTargets: snapshot.macroTargets,
+                macroLogs: snapshot.macroLogs,
+                savedMeals: snapshot.savedMeals
+            )
+            return try encodePrettyJSON(payload)
+        case .savedMeals:
+            let payload = VeldaSavedMealsExportPayload(
+                schemaVersion: 1,
+                domain: "saved_meals",
+                exportedAt: snapshot.exportedAt,
+                savedMeals: snapshot.savedMeals
+            )
+            return try encodePrettyJSON(payload)
         case .recipes:
             struct Box: Codable { let domain: String; let exportedAt: String; let recipes: [Recipe] }
             return try encodePrettyJSON(Box(domain: "recipes", exportedAt: snapshot.exportedAt, recipes: snapshot.recipes))
@@ -223,7 +240,8 @@ final class ExportShareService: @unchecked Sendable {
             lines.append("## Routines (\(snapshot.routines.count))")
             for rt in snapshot.routines {
                 let days = rt.assignedWeekdays.compactMap { (0..<7).contains($0) ? weekdayNames[$0] : nil }.joined(separator: ", ")
-                lines.append("### \(rt.title)\(days.isEmpty ? "" : " (\(days))")")
+                let prefix = rt.emblem.isEmpty ? "" : "\(rt.emblem) "
+                lines.append("### \(prefix)\(rt.title)\(days.isEmpty ? "" : " (\(days))")")
                 for ex in rt.exercises {
                     lines.append("- \(ex.name) [\(ex.muscleHint)]")
                 }
@@ -261,6 +279,15 @@ final class ExportShareService: @unchecked Sendable {
             lines.append("")
             for m in snapshot.macroLogs {
                 lines.append("- \(m.logDate) [\(m.mealSlot)] **\(m.name)**: \(m.kcal) kcal (\(m.proteinG)g P / \(m.carbsG)g C / \(m.fatG)g F / \(m.sodiumMg)mg Na / \(m.sugarG)g Sugar / \(m.cholesterolMg)mg Chol)")
+            }
+            lines.append("")
+        }
+
+        if domain == .all || domain == .macros || domain == .savedMeals {
+            lines.append("## Saved Previous Meals (\(snapshot.savedMeals.count))")
+            for m in snapshot.savedMeals {
+                let notePart = m.notes.isEmpty ? "" : " — \(m.notes)"
+                lines.append("- [\(m.defaultMealSlot)] **\(m.name)**: \(m.kcal) kcal (\(m.proteinG)g P / \(m.carbsG)g C / \(m.fatG)g F / \(m.sodiumMg)mg Na / \(m.sugarG)g Sugar / \(m.cholesterolMg)mg Chol) · Used \(m.useCount)×\(notePart)")
             }
             lines.append("")
         }
@@ -312,11 +339,23 @@ final class ExportShareService: @unchecked Sendable {
         if let full = try? decoder.decode(VeldaFullSnapshot.self, from: data) {
             return .fullSnapshot(full)
         }
+        if let macrosWrap = try? decoder.decode(VeldaMacrosExportPayload.self, from: data) {
+            return .macrosBundle(macrosWrap.macroTargets, macrosWrap.macroLogs, macrosWrap.savedMeals)
+        }
+        if let savedMealsWrap = try? decoder.decode(VeldaSavedMealsExportPayload.self, from: data) {
+            return .savedMeals(savedMealsWrap.savedMeals)
+        }
         if let routineWrap = try? decoder.decode(VeldaRoutineSharePayload.self, from: data) {
             return .singleRoutine(routineWrap.routine)
         }
         if let recipeWrap = try? decoder.decode(VeldaRecipeSharePayload.self, from: data) {
             return .singleRecipe(recipeWrap.recipe)
+        }
+        if let bareSavedMeals = try? decoder.decode([SavedMeal].self, from: data), !bareSavedMeals.isEmpty {
+            return .savedMeals(bareSavedMeals)
+        }
+        if let bareSavedMeal = try? decoder.decode(SavedMeal.self, from: data) {
+            return .savedMeals([bareSavedMeal])
         }
         if let bareRecipe = try? decoder.decode(Recipe.self, from: data) {
             return .singleRecipe(bareRecipe)

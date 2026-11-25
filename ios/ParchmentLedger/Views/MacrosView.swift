@@ -19,12 +19,17 @@ struct MacrosView: View {
     @State private var targetCholesterolDraft: String = ""
 
     @State private var showManualAdd: Bool = false
+    @State private var showPreviousPicker: Bool = false
     @State private var showRecipePicker: Bool = false
     @State private var showAIEstimator: Bool = false
     @State private var showMacroTrends: Bool = false
     @State private var showMedicalSources: Bool = false
     @State private var pendingConfirm: PendingActionConfirmation? = nil
     @State private var missingAIFeatureName: String? = nil
+
+    @State private var previousSearch: String = ""
+    @State private var previousSlotFilter: String = "All"
+    @State private var saveAsPreviousMeal: Bool = true
 
     @State private var foodName: String = ""
     @State private var mealSlot: String = "Lunch"
@@ -64,6 +69,10 @@ struct MacrosView: View {
 
                 if showManualAdd {
                     manualLogPanel
+                }
+
+                if showPreviousPicker {
+                    previousMealsPanel
                 }
 
                 if showRecipePicker {
@@ -307,12 +316,13 @@ struct MacrosView: View {
     // MARK: - Quick Log Controls
 
     private var quickLogButtons: some View {
-        HStack(spacing: 8) {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
             Button("+ Log Meal") {
                 LedgerHaptics.light()
                 withAnimation(.easeInOut(duration: 0.2)) {
                     showManualAdd.toggle()
                     if showManualAdd {
+                        showPreviousPicker = false
                         showRecipePicker = false
                         showAIEstimator = false
                     }
@@ -320,12 +330,26 @@ struct MacrosView: View {
             }
             .buttonStyle(WarmActionButtonStyle(isActive: showManualAdd, fullWidth: true))
 
+            Button(store.savedMeals.isEmpty ? "Previous" : "Previous (\(store.savedMeals.count))") {
+                LedgerHaptics.light()
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showPreviousPicker.toggle()
+                    if showPreviousPicker {
+                        showManualAdd = false
+                        showRecipePicker = false
+                        showAIEstimator = false
+                    }
+                }
+            }
+            .buttonStyle(WarmActionButtonStyle(isActive: showPreviousPicker, fullWidth: true))
+
             Button("From Recipes") {
                 LedgerHaptics.light()
                 withAnimation(.easeInOut(duration: 0.2)) {
                     showRecipePicker.toggle()
                     if showRecipePicker {
                         showManualAdd = false
+                        showPreviousPicker = false
                         showAIEstimator = false
                     }
                 }
@@ -342,6 +366,7 @@ struct MacrosView: View {
                     showAIEstimator.toggle()
                     if showAIEstimator {
                         showManualAdd = false
+                        showPreviousPicker = false
                         showRecipePicker = false
                     }
                 }
@@ -391,6 +416,20 @@ struct MacrosView: View {
                 .foregroundStyle(LedgerColor.inkPrimary)
                 .warmRecessedField()
 
+            Button {
+                LedgerHaptics.light()
+                saveAsPreviousMeal.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    HandDrawnCheckboxView(isChecked: saveAsPreviousMeal)
+                    Text("SAVE TO PREVIOUS MEALS")
+                        .font(LedgerFont.sansSm())
+                        .tracking(1.0)
+                        .foregroundStyle(LedgerColor.inkPrimary)
+                }
+            }
+            .buttonStyle(.plain)
+
             Button("Save Meal Entry") {
                 dismissLedgerKeyboard()
                 let clean = foodName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -415,7 +454,8 @@ struct MacrosView: View {
                         sodiumMg: Int(sodiumText) ?? 0,
                         sugarG: Int(sugarText) ?? 0,
                         cholesterolMg: Int(cholesterolText) ?? 0,
-                        notes: notesText
+                        notes: notesText,
+                        saveToPrevious: saveAsPreviousMeal
                     )
                     clearManualFields()
                     showManualAdd = false
@@ -436,6 +476,157 @@ struct MacrosView: View {
         sugarText = ""
         cholesterolText = ""
         notesText = ""
+        saveAsPreviousMeal = true
+    }
+
+    private var previousMealsPanel: some View {
+        let qClean = previousSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filtered = store.savedMeals.filter { meal in
+            if previousSlotFilter != "All" && meal.defaultMealSlot.caseInsensitiveCompare(previousSlotFilter) != .orderedSame {
+                return false
+            }
+            if !qClean.isEmpty {
+                let hay = "\(meal.name.lowercased()) \(meal.notes.lowercased())"
+                if !hay.contains(qClean) { return false }
+            }
+            return true
+        }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeaderView(
+                title: "Previous Meals",
+                subtitle: "\(filtered.count) SAVED"
+            )
+
+            if store.savedMeals.isEmpty {
+                Text("Meals you log manually or via AI are saved here automatically for 1-tap reuse.")
+                    .font(LedgerFont.serifMd(italic: true))
+                    .foregroundStyle(LedgerColor.inkSecondary)
+            } else {
+                TextField("Search previous meals...", text: $previousSearch)
+                    .font(LedgerFont.serifMd())
+                    .foregroundStyle(LedgerColor.inkPrimary)
+                    .warmRecessedField()
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(["All"] + mealSlots, id: \.self) { slot in
+                            Button(slot) {
+                                LedgerHaptics.light()
+                                previousSlotFilter = slot
+                            }
+                            .buttonStyle(WarmActionButtonStyle(isActive: previousSlotFilter == slot))
+                        }
+                    }
+                }
+
+                if filtered.isEmpty {
+                    Text("No saved meals match that filter.")
+                        .font(LedgerFont.serifMd(italic: true))
+                        .foregroundStyle(LedgerColor.inkSecondary)
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(filtered.prefix(30)) { meal in
+                                HStack(alignment: .center, spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(meal.defaultMealSlot.uppercased()) · USED \(meal.useCount)×")
+                                            .font(LedgerFont.sansSm())
+                                            .tracking(0.8)
+                                            .foregroundStyle(LedgerColor.inkSecondary)
+
+                                        Text(meal.name)
+                                            .font(LedgerFont.serifMd(semibold: true))
+                                            .foregroundStyle(LedgerColor.inkPrimary)
+                                            .lineLimit(1)
+
+                                        Text("\(meal.kcal) kcal · \(meal.proteinG)g P · \(meal.carbsG)g C · \(meal.fatG)g F")
+                                            .font(LedgerFont.sansSm())
+                                            .monospacedDigit()
+                                            .foregroundStyle(LedgerColor.inkSecondary)
+                                            .lineLimit(1)
+
+                                        if meal.sodiumMg > 0 || meal.sugarG > 0 || meal.cholesterolMg > 0 {
+                                            Text("Na \(meal.sodiumMg)mg · Sugar \(meal.sugarG)g · Chol \(meal.cholesterolMg)mg")
+                                                .font(LedgerFont.sansSm())
+                                                .monospacedDigit()
+                                                .foregroundStyle(LedgerColor.inkSecondary)
+                                                .lineLimit(1)
+                                        }
+
+                                        if !meal.notes.isEmpty {
+                                            Text(meal.notes)
+                                                .font(LedgerFont.serifSmItalic())
+                                                .foregroundStyle(LedgerColor.inkSecondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+
+                                    Spacer(minLength: 4)
+
+                                    HStack(spacing: 5) {
+                                        Button("+ Log") {
+                                            pendingConfirm = PendingActionConfirmation(
+                                                title: "Log Previous Meal?",
+                                                message: "Add \"\(meal.name)\" (\(meal.kcal) kcal) to \(meal.defaultMealSlot) on \(DatabaseManager.mediumDateLabel(store.macroDate))?",
+                                                confirmLabel: "Log Meal",
+                                                isDestructive: false
+                                            ) {
+                                                store.logSavedMeal(meal)
+                                            }
+                                        }
+                                        .buttonStyle(PrimaryActionButtonStyle())
+
+                                        Button("Edit") {
+                                            LedgerHaptics.light()
+                                            loadManualFields(from: meal)
+                                        }
+                                        .buttonStyle(WarmActionButtonStyle())
+
+                                        Button {
+                                            pendingConfirm = PendingActionConfirmation(
+                                                title: "Remove Previous Meal?",
+                                                message: "Remove \"\(meal.name)\" from your saved Previous Meals list? Any past daily macro logs stay intact.",
+                                                confirmLabel: "Remove",
+                                                isDestructive: true
+                                            ) {
+                                                store.deleteSavedMeal(meal.id)
+                                            }
+                                        } label: {
+                                            Image(systemName: "trash")
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(LedgerColor.inkSecondary)
+                                        }
+                                        .buttonStyle(WarmIconButtonStyle())
+                                    }
+                                }
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 280)
+                }
+            }
+        }
+        .softPanel()
+    }
+
+    private func loadManualFields(from meal: SavedMeal) {
+        foodName = meal.name
+        mealSlot = mealSlots.contains(meal.defaultMealSlot) ? meal.defaultMealSlot : "Lunch"
+        kcalText = "\(meal.kcal)"
+        proteinText = "\(meal.proteinG)"
+        carbsText = "\(meal.carbsG)"
+        fatText = "\(meal.fatG)"
+        sodiumText = "\(meal.sodiumMg)"
+        sugarText = "\(meal.sugarG)"
+        cholesterolText = "\(meal.cholesterolMg)"
+        notesText = meal.notes
+        saveAsPreviousMeal = true
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showPreviousPicker = false
+            showManualAdd = true
+        }
     }
 
     private var recipeQuickPickPanel: some View {
