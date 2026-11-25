@@ -686,3 +686,264 @@ func formatByteCount(_ bytes: Int64) -> String {
     if b < 1024 * 1024 * 1024 { return String(format: "%.2f MB", b / (1024.0 * 1024.0)) }
     return String(format: "%.2f GB", b / (1024.0 * 1024.0 * 1024.0))
 }
+
+// MARK: - Routine Emblem & Muscle Filter Components
+
+struct RoutineEmblemBadgeView: View {
+    let emblem: String
+    var fontSize: CGFloat = 14
+
+    var body: some View {
+        let clean = RoutineEmblemCatalog.sanitize(emblem)
+        if !clean.isEmpty {
+            if RoutineEmblemCatalog.isShape(clean) {
+                Text(clean)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .foregroundStyle(LedgerColor.warmTerracotta)
+            } else {
+                Text(clean)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .foregroundStyle(LedgerColor.inkPrimary)
+            }
+        }
+    }
+}
+
+struct CalendarEmblemStripView: View {
+    let markers: [CalendarRoutineMarker]
+    let hasLoggedSets: Bool
+    var compact: Bool = false
+
+    var body: some View {
+        if markers.isEmpty {
+            Circle()
+                .fill(LedgerColor.inkPrimary.opacity(hasLoggedSets ? (compact ? 0.95 : 1.0) : (compact ? 0.0 : 0.14)))
+                .frame(width: compact ? 3.5 : 4.0, height: compact ? 3.5 : 4.0)
+        } else {
+            let overflow = markers.count > 3
+            let visible = overflow ? Array(markers.prefix(2)) : Array(markers.prefix(3))
+            let hasAnyEmblem = markers.contains { !$0.emblem.isEmpty }
+
+            VStack(spacing: compact ? 1.5 : 2) {
+                HStack(spacing: compact ? 1.5 : 2.5) {
+                    ForEach(visible) { m in
+                        if m.emblem.isEmpty {
+                            Circle()
+                                .fill(LedgerColor.inkPrimary.opacity(hasLoggedSets ? 0.95 : 0.45))
+                                .frame(width: compact ? 3.5 : 4.5, height: compact ? 3.5 : 4.5)
+                        } else {
+                            RoutineEmblemBadgeView(emblem: m.emblem, fontSize: compact ? 8.5 : 10.5)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    if overflow {
+                        Text("+")
+                            .font(.system(size: compact ? 7.5 : 8.5, weight: .bold))
+                            .foregroundStyle(LedgerColor.inkSecondary)
+                    }
+                }
+                .frame(minHeight: compact ? 10 : 12)
+
+                if hasLoggedSets && hasAnyEmblem {
+                    Capsule()
+                        .fill(LedgerColor.verifiedSage)
+                        .frame(width: compact ? 8 : 11, height: compact ? 1.5 : 2)
+                }
+            }
+        }
+    }
+}
+
+struct RoutineEmblemPickerView: View {
+    @Binding var selectedEmblem: String
+    @State private var customText: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("SELECTED:")
+                    .font(LedgerFont.sansSm())
+                    .tracking(1.0)
+                    .foregroundStyle(LedgerColor.inkSecondary)
+
+                if selectedEmblem.isEmpty {
+                    Text("None")
+                        .font(LedgerFont.serifMd(italic: true))
+                        .foregroundStyle(LedgerColor.inkSecondary)
+                } else {
+                    RoutineEmblemBadgeView(emblem: selectedEmblem, fontSize: 16)
+                }
+
+                Spacer()
+
+                if !selectedEmblem.isEmpty {
+                    Button("Clear") {
+                        LedgerHaptics.light()
+                        selectedEmblem = ""
+                        customText = ""
+                    }
+                    .buttonStyle(WarmActionButtonStyle())
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("SHAPES")
+                    .font(LedgerFont.sansSm())
+                    .tracking(1.2)
+                    .foregroundStyle(LedgerColor.inkSecondary)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(RoutineEmblemCatalog.shapes, id: \.self) { shape in
+                            emblemCell(shape)
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("EMOJIS")
+                    .font(LedgerFont.sansSm())
+                    .tracking(1.2)
+                    .foregroundStyle(LedgerColor.inkSecondary)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(RoutineEmblemCatalog.emojis, id: \.self) { emoji in
+                            emblemCell(emoji)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("Or type any emoji / 1-2 char label...", text: $customText)
+                    .font(LedgerFont.sansMd())
+                    .foregroundStyle(LedgerColor.inkPrimary)
+                    .warmRecessedField()
+                    .onChange(of: customText) { _, newVal in
+                        let sanitized = RoutineEmblemCatalog.sanitize(newVal)
+                        if sanitized != newVal {
+                            customText = sanitized
+                        }
+                        if !sanitized.isEmpty {
+                            selectedEmblem = sanitized
+                        }
+                    }
+            }
+        }
+        .softPanel()
+        .onAppear {
+            if !selectedEmblem.isEmpty &&
+                !RoutineEmblemCatalog.shapes.contains(selectedEmblem) &&
+                !RoutineEmblemCatalog.emojis.contains(selectedEmblem) {
+                customText = selectedEmblem
+            }
+        }
+    }
+
+    private func emblemCell(_ symbol: String) -> some View {
+        let active = selectedEmblem == symbol
+        return Button {
+            LedgerHaptics.light()
+            if active {
+                selectedEmblem = ""
+                customText = ""
+            } else {
+                selectedEmblem = symbol
+                customText = ""
+            }
+        } label: {
+            RoutineEmblemBadgeView(emblem: symbol, fontSize: 15)
+                .frame(width: 32, height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(active ? LedgerColor.warmTerracotta.opacity(0.24) : LedgerColor.parchmentLight.opacity(0.75))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(
+                            active ? LedgerColor.warmTerracotta : LedgerColor.inkPrimary.opacity(0.16),
+                            lineWidth: active ? 1.4 : 0.8
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct MuscleGroupFilterBar: View {
+    @Binding var selectedRegion: MuscleRegion
+    @Binding var selectedSubGroup: MuscleSubGroup?
+    var regions: [MuscleRegion] = MuscleRegion.filterRegions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(regions) { region in
+                        let isSelected = selectedRegion == region
+                        Button {
+                            LedgerHaptics.light()
+                            selectedRegion = region
+                            selectedSubGroup = nil
+                        } label: {
+                            chipLabel(region.rawValue, isActive: isSelected)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if selectedRegion.subGroups.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Button {
+                            LedgerHaptics.light()
+                            selectedSubGroup = nil
+                        } label: {
+                            chipLabel("All \(selectedRegion.rawValue)", isActive: selectedSubGroup == nil, subtle: true)
+                        }
+                        .buttonStyle(.plain)
+
+                        ForEach(selectedRegion.subGroups) { sub in
+                            let isSubSelected = selectedSubGroup == sub
+                            Button {
+                                LedgerHaptics.light()
+                                selectedSubGroup = isSubSelected ? nil : sub
+                            } label: {
+                                chipLabel(sub.rawValue, isActive: isSubSelected, subtle: true)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func chipLabel(_ title: String, isActive: Bool, subtle: Bool = false) -> some View {
+        Text(title.uppercased())
+            .font(LedgerFont.sansSm(semibold: isActive))
+            .tracking(0.6)
+            .foregroundStyle(isActive ? LedgerColor.buttonTextLight : LedgerColor.inkPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, subtle ? 5 : 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        isActive
+                            ? (subtle ? LedgerColor.warmTerracotta : LedgerColor.inkPrimary)
+                            : LedgerColor.parchmentLight.opacity(subtle ? 0.65 : 0.85)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        LedgerColor.inkPrimary.opacity(isActive ? 0.0 : 0.2),
+                        lineWidth: 0.8
+                    )
+            )
+    }
+}

@@ -16,16 +16,18 @@ struct CustomExerciseSheet: View {
     @State private var deleteTarget: Exercise? = nil
 
     @State private var nameDraft: String = ""
-    @State private var muscleDraft: String = "Strength"
+    @State private var selectedRegionDraft: MuscleRegion = .chest
+    @State private var muscleDraft: String = MuscleSubGroup.chest.rawValue
     @State private var trackingDraft: ExerciseTrackingType = .weighted
     @State private var equipmentDraft: String = ""
     @State private var notesDraft: String = ""
     @State private var filmSearch: String = ""
+    @State private var matchMuscleForFilm: Bool = false
     @State private var filmFilename: String = ""
     @State private var addToSelectedDay: Bool = false
+    @State private var listFilterRegion: MuscleRegion = .all
+    @State private var listFilterSubGroup: MuscleSubGroup? = nil
     @State private var pendingConfirm: PendingActionConfirmation? = nil
-
-    private let muscleGroups = ["Strength", "Push", "Pull", "Legs", "Shoulders", "Arms", "Core", "Mobility", "Cardio", "Custom"]
 
     private var inEditor: Bool {
         isCreating || editingId != nil
@@ -128,7 +130,11 @@ struct CustomExerciseSheet: View {
     }
 
     private var listBody: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let filteredCustoms = store.customExercises.filter {
+            listFilterRegion.matches(muscleHint: $0.muscleHint, subGroup: listFilterSubGroup)
+        }
+
+        return VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Button("+ New Custom Exercise") {
                     LedgerHaptics.light()
@@ -139,6 +145,14 @@ struct CustomExerciseSheet: View {
                 Spacer()
             }
             .inkWritten(index: 0, epoch: sheetEpoch)
+
+            if !store.customExercises.isEmpty {
+                MuscleGroupFilterBar(
+                    selectedRegion: $listFilterRegion,
+                    selectedSubGroup: $listFilterSubGroup,
+                    regions: MuscleRegion.filterRegions + [.custom]
+                )
+            }
 
             if store.customExercises.isEmpty {
                 VStack(spacing: 8) {
@@ -155,10 +169,23 @@ struct CustomExerciseSheet: View {
                 }
                 .frame(maxWidth: .infinity)
                 .inkWritten(index: 1, epoch: sheetEpoch)
+            } else if filteredCustoms.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Text("No Matching Custom Movements")
+                        .font(LedgerFont.serifLg(italic: true))
+                        .foregroundStyle(LedgerColor.inkPrimary)
+                    Text("NO MOVEMENTS IN THIS MUSCLE GROUP")
+                        .font(LedgerFont.sansSm())
+                        .tracking(0.8)
+                        .foregroundStyle(LedgerColor.inkSecondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
             } else {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(store.customExercises.enumerated()), id: \.element.id) { idx, ex in
+                        ForEach(Array(filteredCustoms.enumerated()), id: \.element.id) { idx, ex in
                             customCard(ex)
                                 .inkWritten(index: idx + 1, epoch: sheetEpoch)
                         }
@@ -233,8 +260,14 @@ struct CustomExerciseSheet: View {
     }
 
     private var editorBody: some View {
-        let filmCandidates = DatabaseManager.shared.fuzzySearchExercises(query: filmSearch, limit: 12)
-            .filter { $0.videoFilename != nil }
+        let filmSubGroup = matchMuscleForFilm ? MuscleSubGroup.fromHint(muscleDraft) : nil
+        let filmRegion: MuscleRegion = matchMuscleForFilm ? (filmSubGroup?.region ?? .all) : .all
+        let filmCandidates = DatabaseManager.shared.fuzzySearchExercises(
+            query: filmSearch,
+            region: filmRegion,
+            subGroup: filmSubGroup,
+            limit: 16
+        ).filter { $0.videoFilename != nil }
 
         return ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 16) {
@@ -252,18 +285,48 @@ struct CustomExerciseSheet: View {
                 .inkWritten(index: 0, epoch: sheetEpoch)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("MUSCLE / FOCUS GROUP")
-                        .font(LedgerFont.sansSm())
-                        .tracking(1.6)
-                        .foregroundStyle(LedgerColor.inkSecondary)
+                    HStack {
+                        Text("MUSCLE GROUP")
+                            .font(LedgerFont.sansSm())
+                            .tracking(1.6)
+                            .foregroundStyle(LedgerColor.inkSecondary)
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
-                        ForEach(muscleGroups, id: \.self) { group in
-                            Button(group) {
-                                LedgerHaptics.light()
-                                muscleDraft = group
+                        Spacer()
+
+                        Text("ASSIGNED: \(muscleDraft.uppercased())")
+                            .font(LedgerFont.sansSm(semibold: true))
+                            .tracking(0.8)
+                            .foregroundStyle(LedgerColor.warmTerracotta)
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(MuscleRegion.pickerRegions) { region in
+                                let active = selectedRegionDraft == region
+                                Button(region.rawValue) {
+                                    LedgerHaptics.light()
+                                    selectedRegionDraft = region
+                                    if let firstSub = region.subGroups.first {
+                                        muscleDraft = firstSub.rawValue
+                                    }
+                                }
+                                .buttonStyle(WarmActionButtonStyle(isActive: active))
                             }
-                            .buttonStyle(WarmActionButtonStyle(isActive: muscleDraft.caseInsensitiveCompare(group) == .orderedSame))
+                        }
+                    }
+
+                    if selectedRegionDraft.subGroups.count > 1 {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(selectedRegionDraft.subGroups) { sub in
+                                    let active = muscleDraft.caseInsensitiveCompare(sub.rawValue) == .orderedSame
+                                    Button(sub.rawValue) {
+                                        LedgerHaptics.light()
+                                        muscleDraft = sub.rawValue
+                                    }
+                                    .buttonStyle(WarmActionButtonStyle(isActive: active))
+                                }
+                            }
                         }
                     }
                 }
@@ -315,10 +378,20 @@ struct CustomExerciseSheet: View {
                 .inkWritten(index: 4, epoch: sheetEpoch)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("OPTIONAL REFERENCE MOVEKIT FILM")
-                        .font(LedgerFont.sansSm())
-                        .tracking(1.6)
-                        .foregroundStyle(LedgerColor.inkSecondary)
+                    HStack {
+                        Text("OPTIONAL REFERENCE MOVEKIT FILM")
+                            .font(LedgerFont.sansSm())
+                            .tracking(1.6)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+
+                        Spacer()
+
+                        Button(matchMuscleForFilm ? "Filter: \(muscleDraft)" : "All Films") {
+                            LedgerHaptics.light()
+                            matchMuscleForFilm.toggle()
+                        }
+                        .buttonStyle(WarmActionButtonStyle(isActive: matchMuscleForFilm))
+                    }
 
                     TextField("Filter MoveKit films (leave blank for standalone)...", text: $filmSearch)
                         .font(LedgerFont.sansMd())
@@ -362,11 +435,13 @@ struct CustomExerciseSheet: View {
         editingId = nil
         isCreating = true
         nameDraft = ""
-        muscleDraft = "Strength"
+        selectedRegionDraft = .chest
+        muscleDraft = MuscleSubGroup.chest.rawValue
         trackingDraft = .weighted
         equipmentDraft = ""
         notesDraft = ""
         filmSearch = ""
+        matchMuscleForFilm = false
         filmFilename = ""
         addToSelectedDay = true
         sheetEpoch &+= 1
@@ -376,11 +451,19 @@ struct CustomExerciseSheet: View {
         isCreating = false
         editingId = ex.id
         nameDraft = ex.name
-        muscleDraft = ex.muscleHint.isEmpty ? "Custom" : ex.muscleHint
+        let initialHint = ex.muscleHint.isEmpty ? "Custom" : ex.muscleHint
+        if let mapped = MuscleSubGroup.fromHint(initialHint) {
+            selectedRegionDraft = mapped.region
+            muscleDraft = mapped.rawValue
+        } else {
+            selectedRegionDraft = .custom
+            muscleDraft = initialHint
+        }
         trackingDraft = ExerciseTrackingType(rawValue: ex.trackingType) ?? .weighted
         equipmentDraft = ex.equipment
         notesDraft = ex.notes
         filmSearch = ""
+        matchMuscleForFilm = false
         filmFilename = ex.videoFilename ?? ""
         addToSelectedDay = false
         sheetEpoch &+= 1
