@@ -288,23 +288,123 @@ enum ScheduleSource: String, Equatable {
     case unassigned
 }
 
+enum RoutineScheduleSpan: Int, CaseIterable, Identifiable, Codable {
+    case oneWeek = 1
+    case twoWeeks = 2
+    case threeWeeks = 3
+    case fourWeeks = 4
+    case sixWeeks = 6
+    case eightWeeks = 8
+    case twelveWeeks = 12
+    case sixteenWeeks = 16
+    case twentyFourWeeks = 24
+    case fiftyTwoWeeks = 52
+
+    static let defaultSpan: RoutineScheduleSpan = .fourWeeks
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .oneWeek: return "1 Week"
+        case .fiftyTwoWeeks: return "52 Weeks (1 Yr)"
+        default: return "\(rawValue) Weeks"
+        }
+    }
+
+    var shortLabel: String {
+        rawValue == 1 ? "1 Wk" : "\(rawValue) Wks"
+    }
+
+    static func fromWeeks(_ weeks: Int) -> RoutineScheduleSpan {
+        if let exact = RoutineScheduleSpan(rawValue: weeks) { return exact }
+        return allCases.min(by: { abs($0.rawValue - weeks) < abs($1.rawValue - weeks) }) ?? .defaultSpan
+    }
+}
+
+enum InlineAssignScope: Hashable, Identifiable {
+    case thisDateOnly
+    case weeks(RoutineScheduleSpan)
+
+    var id: String {
+        switch self {
+        case .thisDateOnly: return "this_date"
+        case .weeks(let span): return "weeks_\(span.rawValue)"
+        }
+    }
+
+    static var allOptions: [InlineAssignScope] {
+        [.thisDateOnly] + RoutineScheduleSpan.allCases.map { .weeks($0) }
+    }
+
+    func menuLabel(dateShort: String, weekdayFull: String) -> String {
+        switch self {
+        case .thisDateOnly:
+            return "This Date Only (\(dateShort))"
+        case .weeks(let span):
+            let plural = span.rawValue == 1 ? weekdayFull : "\(weekdayFull)s"
+            return "\(span.label) (\(span.rawValue) \(plural))"
+        }
+    }
+
+    func triggerLabel(dateShort: String, weekdayShort: String) -> String {
+        switch self {
+        case .thisDateOnly: return "This Date (\(dateShort))"
+        case .weeks(let span): return "\(span.shortLabel) · \(weekdayShort)s"
+        }
+    }
+}
+
+struct RoutineRemovalInfo: Identifiable, Equatable {
+    var id: String { "\(routineId)_\(sessionDate)" }
+    let routineId: String
+    let title: String
+    let sessionDate: String
+    let displayDateShort: String
+    let remainingCount: Int
+    let hasRecurringWeekly: Bool
+
+    var hasRemainingBeyondToday: Bool {
+        remainingCount > 1 || hasRecurringWeekly
+    }
+}
+
 struct RoutineSummary: Identifiable, Equatable, Codable {
     let id: String
     let title: String
     var emblem: String = ""
     let exercises: [Exercise]
     let assignedWeekdays: [Int] // 0=Mon .. 6=Sun
+    var scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue
+    var upcomingDateCount: Int = 0
+    var scheduledThroughDate: String? = nil
+    var hasLegacyWeekly: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case id, title, emblem, exercises, assignedWeekdays
+        case scheduleWeeks, upcomingDateCount, scheduledThroughDate, hasLegacyWeekly
     }
 
-    init(id: String, title: String, emblem: String = "", exercises: [Exercise], assignedWeekdays: [Int]) {
+    init(
+        id: String,
+        title: String,
+        emblem: String = "",
+        exercises: [Exercise],
+        assignedWeekdays: [Int],
+        scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue,
+        upcomingDateCount: Int = 0,
+        scheduledThroughDate: String? = nil,
+        hasLegacyWeekly: Bool = false
+    ) {
         self.id = id
         self.title = title
         self.emblem = emblem
         self.exercises = exercises
         self.assignedWeekdays = assignedWeekdays
+        self.scheduleWeeks = scheduleWeeks
+        self.upcomingDateCount = upcomingDateCount
+        self.scheduledThroughDate = scheduledThroughDate
+        self.hasLegacyWeekly = hasLegacyWeekly
     }
 
     init(from decoder: Decoder) throws {
@@ -314,6 +414,10 @@ struct RoutineSummary: Identifiable, Equatable, Codable {
         emblem = try c.decodeIfPresent(String.self, forKey: .emblem) ?? ""
         exercises = try c.decode([Exercise].self, forKey: .exercises)
         assignedWeekdays = try c.decode([Int].self, forKey: .assignedWeekdays)
+        scheduleWeeks = try c.decodeIfPresent(Int.self, forKey: .scheduleWeeks) ?? RoutineScheduleSpan.defaultSpan.rawValue
+        upcomingDateCount = try c.decodeIfPresent(Int.self, forKey: .upcomingDateCount) ?? 0
+        scheduledThroughDate = try c.decodeIfPresent(String.self, forKey: .scheduledThroughDate)
+        hasLegacyWeekly = try c.decodeIfPresent(Bool.self, forKey: .hasLegacyWeekly) ?? false
     }
 }
 

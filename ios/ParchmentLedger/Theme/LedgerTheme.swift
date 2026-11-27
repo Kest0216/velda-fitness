@@ -261,6 +261,8 @@ struct CenteredCalendarHeaderView: View {
                 .tracking(1.6)
                 .foregroundStyle(LedgerColor.inkPrimary)
                 .lineLimit(1)
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: title)
 
             HStack {
                 Button(action: onPrevious) {
@@ -279,6 +281,35 @@ struct CenteredCalendarHeaderView: View {
                 .buttonStyle(WarmIconButtonStyle())
                 .accessibilityLabel("Next month")
             }
+        }
+    }
+}
+
+struct WeekSpanDropdownView: View {
+    @Binding var selectedWeeks: RoutineScheduleSpan
+    var compact: Bool = false
+
+    var body: some View {
+        Menu {
+            ForEach(RoutineScheduleSpan.allCases) { span in
+                Button {
+                    LedgerHaptics.light()
+                    selectedWeeks = span
+                } label: {
+                    if span == selectedWeeks {
+                        Label(span.label, systemImage: "checkmark")
+                    } else {
+                        Text(span.label)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(compact ? selectedWeeks.shortLabel : selectedWeeks.label)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .uniformSecondaryButtonChrome(fullWidth: !compact)
         }
     }
 }

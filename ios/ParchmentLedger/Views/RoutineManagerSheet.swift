@@ -21,6 +21,9 @@ struct RoutineManagerSheet: View {
     @State private var draftEmblem: String = ""
     @State private var draftExercises: [Exercise] = []
     @State private var draftWeekdays: Set<Int> = []
+    @State private var draftScheduleWeeks: RoutineScheduleSpan = .defaultSpan
+    @State private var initialEditWeekdays: Set<Int> = []
+    @State private var initialEditScheduleWeeks: RoutineScheduleSpan = .defaultSpan
     @State private var draftAssignSelectedDate: Bool = false
     @State private var searchQuery: String = ""
     @State private var filterRegion: MuscleRegion = .all
@@ -33,6 +36,7 @@ struct RoutineManagerSheet: View {
     @State private var aiPrompt: String = ""
     @State private var aiEmblem: String = ""
     @State private var aiWeekdays: Set<Int> = []
+    @State private var aiScheduleWeeks: RoutineScheduleSpan = .defaultSpan
     @State private var aiAssignSelectedDate: Bool = true
     @State private var aiIncludeCustom: Bool = true
 
@@ -40,6 +44,7 @@ struct RoutineManagerSheet: View {
     @State private var shareItem: IdentifiedShareURL? = nil
     @State private var showRoutineImporter: Bool = false
     @State private var pendingConfirm: PendingActionConfirmation? = nil
+    @State private var removePromptInfo: RoutineRemovalInfo? = nil
     @State private var missingAIFeatureName: String? = nil
 
     private let weekdayShorts = ["M", "T", "W", "T", "F", "S", "S"]
@@ -107,6 +112,41 @@ struct RoutineManagerSheet: View {
             }
         }
         .actionConfirmationAlert($pendingConfirm)
+        .confirmationDialog(
+            "Remove \(removePromptInfo?.title ?? "Routine")?",
+            isPresented: Binding(
+                get: { removePromptInfo != nil },
+                set: { if !$0 { removePromptInfo = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let info = removePromptInfo {
+                Button("Just This Day (\(info.displayDateShort))", role: .destructive) {
+                    store.unassignRoutine(info.routineId, fromSelectedDateOnly: true)
+                    removePromptInfo = nil
+                }
+                if info.hasRemainingBeyondToday {
+                    let remLabel = info.hasRecurringWeekly
+                        ? "This Day & All Remaining"
+                        : "This Day & Remaining (\(info.remainingCount) Days)"
+                    Button(remLabel, role: .destructive) {
+                        store.unassignRoutineAndRemaining(info.routineId)
+                        removePromptInfo = nil
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                removePromptInfo = nil
+            }
+        } message: {
+            if let info = removePromptInfo {
+                if info.hasRemainingBeyondToday {
+                    Text("Remove \"\(info.title)\" from \(info.displayDateShort) only, or from this day and all remaining scheduled entries? Logged workout sets stay saved.")
+                } else {
+                    Text("Remove \"\(info.title)\" from \(info.displayDateShort)? Logged workout sets stay saved.")
+                }
+            }
+        }
         .aiCredentialRequiredAlert(featureName: $missingAIFeatureName) {
             dismiss()
             store.selectPillar(.vault)
@@ -322,8 +362,8 @@ struct RoutineManagerSheet: View {
                 }
                 .inkWritten(index: 1, epoch: sheetEpoch)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("ASSIGN TO WEEKLY STRIP")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("SCHEDULE DAYS & DURATION")
                         .font(LedgerFont.sansSm())
                         .tracking(1.6)
                         .foregroundStyle(LedgerColor.inkSecondary)
@@ -368,6 +408,31 @@ struct RoutineManagerSheet: View {
                         }
                     }
 
+                    HStack(spacing: 10) {
+                        Text("DURATION")
+                            .font(LedgerFont.sansSm())
+                            .tracking(1.2)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+
+                        WeekSpanDropdownView(selectedWeeks: $aiScheduleWeeks)
+                            .disabled(store.isGeneratingRoutine)
+                    }
+
+                    let aiPreviewDates = DatabaseManager.scheduledDates(
+                        forWeekdays: Array(aiWeekdays),
+                        weeks: aiScheduleWeeks.rawValue,
+                        startingFrom: store.selectedDate,
+                        includeStartDate: aiAssignSelectedDate
+                    )
+                    Text(
+                        aiPreviewDates.isEmpty
+                            ? "SELECT DAYS ABOVE TO SCHEDULE (NO ENDLESS REPEAT)"
+                            : "SCHEDULES \(aiPreviewDates.count) SESSION\(aiPreviewDates.count == 1 ? "" : "S") · \(DatabaseManager.shortDateLabel(aiPreviewDates.first!).uppercased()) – \(DatabaseManager.shortDateLabel(aiPreviewDates.last!).uppercased())"
+                    )
+                    .font(LedgerFont.sansSm())
+                    .tracking(0.8)
+                    .foregroundStyle(LedgerColor.inkSecondary)
+
                     Button {
                         LedgerHaptics.light()
                         aiAssignSelectedDate.toggle()
@@ -382,7 +447,7 @@ struct RoutineManagerSheet: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(store.isGeneratingRoutine)
-                    .padding(.top, 4)
+                    .padding(.top, 2)
                 }
                 .inkWritten(index: 1, epoch: sheetEpoch)
 
@@ -408,6 +473,7 @@ struct RoutineManagerSheet: View {
                                     prompt: cleanPrompt,
                                     emblem: aiEmblem,
                                     weekdays: Array(aiWeekdays).sorted(),
+                                    scheduleWeeks: aiScheduleWeeks.rawValue,
                                     assignSelectedDate: aiAssignSelectedDate,
                                     includeCustomExercises: aiIncludeCustom
                                 ) {
@@ -488,18 +554,51 @@ struct RoutineManagerSheet: View {
                 Spacer(minLength: 4)
             }
 
-            // 1-click weekly assignment strip
-            VStack(alignment: .leading, spacing: 4) {
-                Text("WEEKLY SCHEDULE (TAP DAYS · MULTIPLE PER DAY)")
-                    .font(LedgerFont.sansSm())
-                    .tracking(1.2)
-                    .foregroundStyle(LedgerColor.inkSecondary)
+            // Bounded schedule assignment strip + duration dropdown
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("SCHEDULE (TAP DAYS)")
+                            .font(LedgerFont.sansSm())
+                            .tracking(1.2)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+
+                        let spanSubtitle: String = {
+                            if let endISO = routine.scheduledThroughDate {
+                                return "THROUGH \(DatabaseManager.shortDateLabel(endISO).uppercased()) · \(routine.upcomingDateCount) DAY\(routine.upcomingDateCount == 1 ? "" : "S")"
+                            }
+                            if routine.hasLegacyWeekly {
+                                return "RECURRING WEEKLY"
+                            }
+                            return "NOT SCHEDULED"
+                        }()
+
+                        Text(spanSubtitle)
+                            .font(LedgerFont.sansSm())
+                            .tracking(0.8)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+                    }
+
+                    Spacer()
+
+                    WeekSpanDropdownView(
+                        selectedWeeks: Binding(
+                            get: { RoutineScheduleSpan.fromWeeks(routine.scheduleWeeks) },
+                            set: { store.updateRoutineScheduleWeeks(routineId: routine.id, scheduleWeeks: $0.rawValue) }
+                        ),
+                        compact: true
+                    )
+                }
 
                 HStack(spacing: 4) {
                     ForEach(0..<7, id: \.self) { dow in
                         let active = routine.assignedWeekdays.contains(dow)
                         Button {
-                            store.toggleRoutineWeekday(routineId: routine.id, dayOfWeek: dow)
+                            store.toggleRoutineWeekday(
+                                routineId: routine.id,
+                                dayOfWeek: dow,
+                                scheduleWeeks: routine.scheduleWeeks
+                            )
                         } label: {
                             Text(weekdayShorts[dow])
                                 .font(LedgerFont.sansSm(semibold: active))
@@ -532,7 +631,12 @@ struct RoutineManagerSheet: View {
 
             HStack(spacing: 8) {
                 Button(assignedToViewedDate ? "On \(selectedDateShort) ✓" : "+ \(selectedDateShort)") {
-                    store.toggleRoutineOnSelectedDate(routine.id)
+                    if assignedToViewedDate {
+                        LedgerHaptics.heavy()
+                        removePromptInfo = store.removalInfo(forRoutineId: routine.id, title: routine.title)
+                    } else {
+                        store.assignRoutine(routine.id, scope: .thisDateOnly)
+                    }
                 }
                 .buttonStyle(WarmActionButtonStyle(isActive: assignedToViewedDate))
 
@@ -613,18 +717,8 @@ struct RoutineManagerSheet: View {
                 }
                 .inkWritten(index: 1, epoch: sheetEpoch)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("CALENDAR EMBLEM (OPTIONAL)")
-                        .font(LedgerFont.sansSm())
-                        .tracking(1.6)
-                        .foregroundStyle(LedgerColor.inkSecondary)
-
-                    RoutineEmblemPickerView(selectedEmblem: $aiEmblem)
-                }
-                .inkWritten(index: 1, epoch: sheetEpoch)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("ASSIGN TO WEEKLY STRIP")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("SCHEDULE DAYS & DURATION")
                         .font(LedgerFont.sansSm())
                         .tracking(1.6)
                         .foregroundStyle(LedgerColor.inkSecondary)
@@ -668,6 +762,30 @@ struct RoutineManagerSheet: View {
                         }
                     }
 
+                    HStack(spacing: 10) {
+                        Text("DURATION")
+                            .font(LedgerFont.sansSm())
+                            .tracking(1.2)
+                            .foregroundStyle(LedgerColor.inkSecondary)
+
+                        WeekSpanDropdownView(selectedWeeks: $draftScheduleWeeks)
+                    }
+
+                    let draftPreviewDates = DatabaseManager.scheduledDates(
+                        forWeekdays: Array(draftWeekdays),
+                        weeks: draftScheduleWeeks.rawValue,
+                        startingFrom: store.selectedDate,
+                        includeStartDate: isCreatingNew && draftAssignSelectedDate
+                    )
+                    Text(
+                        draftPreviewDates.isEmpty
+                            ? "SELECT DAYS ABOVE TO SCHEDULE (NO ENDLESS REPEAT)"
+                            : "SCHEDULES \(draftPreviewDates.count) SESSION\(draftPreviewDates.count == 1 ? "" : "S") · \(DatabaseManager.shortDateLabel(draftPreviewDates.first!).uppercased()) – \(DatabaseManager.shortDateLabel(draftPreviewDates.last!).uppercased())"
+                    )
+                    .font(LedgerFont.sansSm())
+                    .tracking(0.8)
+                    .foregroundStyle(LedgerColor.inkSecondary)
+
                     if isCreatingNew {
                         Button {
                             LedgerHaptics.light()
@@ -682,7 +800,7 @@ struct RoutineManagerSheet: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 4)
+                        .padding(.top, 2)
                     }
                 }
                 .inkWritten(index: 1, epoch: sheetEpoch)
@@ -870,6 +988,7 @@ struct RoutineManagerSheet: View {
         aiPrompt = ""
         aiEmblem = ""
         aiWeekdays = [store.selectedDow]
+        aiScheduleWeeks = .defaultSpan
         aiAssignSelectedDate = true
         sheetEpoch &+= 1
     }
@@ -882,6 +1001,9 @@ struct RoutineManagerSheet: View {
         draftEmblem = ""
         draftExercises = []
         draftWeekdays = [store.selectedDow]
+        draftScheduleWeeks = .defaultSpan
+        initialEditWeekdays = []
+        initialEditScheduleWeeks = .defaultSpan
         draftAssignSelectedDate = true
         searchQuery = ""
         filterRegion = .all
@@ -900,6 +1022,10 @@ struct RoutineManagerSheet: View {
         draftEmblem = routine.emblem
         draftExercises = routine.exercises
         draftWeekdays = Set(routine.assignedWeekdays)
+        let resolvedSpan = RoutineScheduleSpan.fromWeeks(routine.scheduleWeeks)
+        draftScheduleWeeks = resolvedSpan
+        initialEditWeekdays = Set(routine.assignedWeekdays)
+        initialEditScheduleWeeks = resolvedSpan
         draftAssignSelectedDate = false
         searchQuery = ""
         filterRegion = .all
@@ -918,6 +1044,9 @@ struct RoutineManagerSheet: View {
         draftEmblem = ""
         draftExercises = []
         draftWeekdays = []
+        draftScheduleWeeks = .defaultSpan
+        initialEditWeekdays = []
+        initialEditScheduleWeeks = .defaultSpan
         searchQuery = ""
         filterRegion = .all
         filterSubGroup = nil
@@ -927,12 +1056,15 @@ struct RoutineManagerSheet: View {
     private func saveDraftRoutine() {
         let exIds = draftExercises.map(\.id)
         if let rid = editingRoutineId {
+            let scheduleChanged = (draftWeekdays != initialEditWeekdays) || (draftScheduleWeeks != initialEditScheduleWeeks)
             store.updateRoutine(
                 id: rid,
                 title: draftTitle,
                 emblem: draftEmblem,
                 exerciseIds: exIds,
-                weekdays: Array(draftWeekdays).sorted()
+                weekdays: Array(draftWeekdays).sorted(),
+                scheduleWeeks: draftScheduleWeeks.rawValue,
+                rescheduleFuture: scheduleChanged
             )
             resetEditor()
             sheetEpoch &+= 1
@@ -942,6 +1074,7 @@ struct RoutineManagerSheet: View {
                 emblem: draftEmblem,
                 exerciseIds: exIds,
                 weekdays: Array(draftWeekdays).sorted(),
+                scheduleWeeks: draftScheduleWeeks.rawValue,
                 assignSelectedDate: draftAssignSelectedDate
             )
             resetEditor()
