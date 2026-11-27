@@ -11,8 +11,9 @@ struct WorkoutsView: View {
     @EnvironmentObject var store: LedgerStore
     @State private var routineTitleDraft: String = ""
     @State private var routineEmblemDraft: String = ""
-    @State private var removeTargetRoutine: DayRoutineSection? = nil
-    @State private var assignToDateOnly: Bool = false
+    @State private var removePromptInfo: RoutineRemovalInfo? = nil
+    @State private var inlineAssignScope: InlineAssignScope = .weeks(.defaultSpan)
+    @State private var monthSlideDirection: Int = 1
     @State private var pendingConfirm: PendingActionConfirmation? = nil
     @FocusState private var pickerFocused: Bool
 
@@ -108,25 +109,38 @@ struct WorkoutsView: View {
         .scrollDismissesKeyboard(.interactively)
         .actionConfirmationAlert($pendingConfirm)
         .confirmationDialog(
-            "Remove \(removeTargetRoutine?.title ?? "Routine")?",
+            "Remove \(removePromptInfo?.title ?? "Routine")?",
             isPresented: Binding(
-                get: { removeTargetRoutine != nil },
-                set: { if !$0 { removeTargetRoutine = nil } }
+                get: { removePromptInfo != nil },
+                set: { if !$0 { removePromptInfo = nil } }
             ),
             titleVisibility: .visible
         ) {
-            if let wk = store.workout, let target = removeTargetRoutine {
-                Button("Remove from \(wk.displayDateShort) Only", role: .destructive) {
-                    store.unassignRoutine(target.id, fromSelectedDateOnly: true)
-                    removeTargetRoutine = nil
+            if let info = removePromptInfo {
+                Button("Just This Day (\(info.displayDateShort))", role: .destructive) {
+                    store.unassignRoutine(info.routineId, fromSelectedDateOnly: true)
+                    removePromptInfo = nil
                 }
-                Button("Remove from Every \(wk.dayFullName)", role: .destructive) {
-                    store.unassignRoutine(target.id, fromSelectedDateOnly: false)
-                    removeTargetRoutine = nil
+                if info.hasRemainingBeyondToday {
+                    let remLabel = info.hasRecurringWeekly
+                        ? "This Day & All Remaining"
+                        : "This Day & Remaining (\(info.remainingCount) Days)"
+                    Button(remLabel, role: .destructive) {
+                        store.unassignRoutineAndRemaining(info.routineId)
+                        removePromptInfo = nil
+                    }
                 }
             }
             Button("Cancel", role: .cancel) {
-                removeTargetRoutine = nil
+                removePromptInfo = nil
+            }
+        } message: {
+            if let info = removePromptInfo {
+                if info.hasRemainingBeyondToday {
+                    Text("Remove \"\(info.title)\" from \(info.displayDateShort) only, or from this day and all remaining scheduled entries? Logged workout sets stay saved.")
+                } else {
+                    Text("Remove \"\(info.title)\" from \(info.displayDateShort)? Logged workout sets stay saved.")
+                }
             }
         }
     }
@@ -134,12 +148,23 @@ struct WorkoutsView: View {
     private func monthlyCalendarPanel() -> some View {
         let headers = ["M", "T", "W", "T", "F", "S", "S"]
         let cols = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
+        let monthKey = DatabaseManager.monthAnchorKey(store.displayedMonthAnchor)
 
         return VStack(alignment: .leading, spacing: 10) {
             CenteredCalendarHeaderView(
                 title: DatabaseManager.monthTitle(store.displayedMonthAnchor),
-                onPrevious: { store.shiftDisplayedMonth(by: -1) },
-                onNext: { store.shiftDisplayedMonth(by: 1) }
+                onPrevious: {
+                    monthSlideDirection = -1
+                    withAnimation(.easeInOut(duration: 0.24)) {
+                        store.shiftDisplayedMonth(by: -1)
+                    }
+                },
+                onNext: {
+                    monthSlideDirection = 1
+                    withAnimation(.easeInOut(duration: 0.24)) {
+                        store.shiftDisplayedMonth(by: 1)
+                    }
+                }
             )
 
             HStack {
@@ -150,60 +175,74 @@ struct WorkoutsView: View {
                 .buttonStyle(WarmActionButtonStyle(isActive: store.selectedDate == store.todayDate))
             }
 
-            LazyVGrid(columns: cols, spacing: 6) {
+            HStack(spacing: 4) {
                 ForEach(Array(headers.enumerated()), id: \.offset) { _, sym in
                     Text(sym)
                         .font(LedgerFont.sansSm())
                         .foregroundStyle(LedgerColor.inkSecondary)
                         .frame(maxWidth: .infinity)
                 }
+            }
 
-                ForEach(store.monthSlots) { slot in
-                    if let iso = slot.isoDate, let dayNum = slot.dayNumber {
-                        let isSelected = iso == store.selectedDate
-                        Button {
-                            store.selectDate(iso)
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                store.showMonthlyCalendar = false
-                            }
-                        } label: {
-                            VStack(spacing: 3) {
-                                Text("\(dayNum)")
-                                    .font(LedgerFont.sansSm(semibold: isSelected || slot.isToday))
-                                    .monospacedDigit()
-                                    .foregroundStyle(isSelected || slot.isToday ? LedgerColor.inkPrimary : LedgerColor.inkSecondary)
+            ZStack(alignment: .top) {
+                LazyVGrid(columns: cols, spacing: 6) {
+                    ForEach(store.monthSlots) { slot in
+                        if let iso = slot.isoDate, let dayNum = slot.dayNumber {
+                            let isSelected = iso == store.selectedDate
+                            Button {
+                                store.selectDate(iso)
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    store.showMonthlyCalendar = false
+                                }
+                            } label: {
+                                VStack(spacing: 3) {
+                                    Text("\(dayNum)")
+                                        .font(LedgerFont.sansSm(semibold: isSelected || slot.isToday))
+                                        .monospacedDigit()
+                                        .foregroundStyle(isSelected || slot.isToday ? LedgerColor.inkPrimary : LedgerColor.inkSecondary)
 
-                                CalendarEmblemStripView(
-                                    markers: slot.routineMarkers,
-                                    hasLoggedSets: slot.hasLoggedSets,
-                                    compact: true
+                                    CalendarEmblemStripView(
+                                        markers: slot.routineMarkers,
+                                        hasLoggedSets: slot.hasLoggedSets,
+                                        compact: true
+                                    )
+                                    .frame(height: 16, alignment: .top)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 42, maxHeight: 42, alignment: .top)
+                                .padding(.top, 5)
+                                .background(
+                                    RadialGradient(
+                                        colors: isSelected
+                                            ? [LedgerColor.warmTerracotta.opacity(0.32), LedgerColor.warmAmber.opacity(0.10), .clear]
+                                            : [.clear, .clear],
+                                        center: .center,
+                                        startRadius: 2,
+                                        endRadius: 20
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .strokeBorder(LedgerColor.inkPrimary.opacity(slot.isToday ? 0.45 : 0.0), lineWidth: 1.1)
                                 )
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
-                            .background(
-                                RadialGradient(
-                                    colors: isSelected
-                                        ? [LedgerColor.warmTerracotta.opacity(0.32), LedgerColor.warmAmber.opacity(0.10), .clear]
-                                        : [.clear, .clear],
-                                    center: .center,
-                                    startRadius: 2,
-                                    endRadius: 20
-                                )
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .strokeBorder(LedgerColor.inkPrimary.opacity(slot.isToday ? 0.45 : 0.0), lineWidth: 1.1)
-                            )
+                            .buttonStyle(.plain)
+                        } else {
+                            Color.clear
+                                .frame(height: 42)
                         }
-                        .buttonStyle(.plain)
-                    } else {
-                        Color.clear
-                            .frame(height: 28)
                     }
                 }
+                .id(monthKey)
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: monthSlideDirection >= 0 ? .trailing : .leading).combined(with: .opacity),
+                        removal: .move(edge: monthSlideDirection >= 0 ? .leading : .trailing).combined(with: .opacity)
+                    )
+                )
             }
+            .frame(height: 282, alignment: .top)
+            .clipped()
 
             let emblemRoutines = store.routines.filter { !$0.emblem.isEmpty }
             if !emblemRoutines.isEmpty {
@@ -250,6 +289,7 @@ struct WorkoutsView: View {
                             hasLoggedSets: slot.hasLoggedSets,
                             compact: false
                         )
+                        .frame(height: 16, alignment: .top)
                         .padding(.top, 1)
                     }
                     .frame(maxWidth: .infinity)
@@ -299,7 +339,7 @@ struct WorkoutsView: View {
                         LedgerHaptics.light()
                         store.closeExercisePicker()
                         pickerFocused = false
-                        assignToDateOnly = !wk.isToday
+                        inlineAssignScope = wk.isToday ? .weeks(.defaultSpan) : .thisDateOnly
                         store.showInlineRoutinePicker.toggle()
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: store.showInlineRoutinePicker))
@@ -319,7 +359,7 @@ struct WorkoutsView: View {
                         LedgerHaptics.light()
                         store.closeExercisePicker()
                         pickerFocused = false
-                        assignToDateOnly = !wk.isToday
+                        inlineAssignScope = wk.isToday ? .weeks(.defaultSpan) : .thisDateOnly
                         store.showInlineRoutinePicker.toggle()
                     }
                     .buttonStyle(WarmActionButtonStyle(isActive: store.showInlineRoutinePicker))
@@ -406,20 +446,8 @@ struct WorkoutsView: View {
 
                 HStack(spacing: 8) {
                     Button("Remove") {
-                        if wk.scheduleSource == .dateOverride {
-                            LedgerHaptics.heavy()
-                            pendingConfirm = PendingActionConfirmation(
-                                title: "Remove Routine for \(wk.displayDateShort)?",
-                                message: "Remove \"\(section.title)\" from \(wk.displayDateShort)? Any logged sets for this date stay saved.",
-                                confirmLabel: "Remove",
-                                isDestructive: true
-                            ) {
-                                store.unassignRoutine(section.id, fromSelectedDateOnly: true)
-                            }
-                        } else {
-                            LedgerHaptics.heavy()
-                            removeTargetRoutine = section
-                        }
+                        LedgerHaptics.heavy()
+                        removePromptInfo = store.removalInfo(forRoutineId: section.id, title: section.title)
                     }
                     .buttonStyle(WarmActionButtonStyle())
 
@@ -432,17 +460,41 @@ struct WorkoutsView: View {
     private func inlineRoutinePickerPanel(_ wk: DayWorkout) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Button("This Date (\(wk.displayDateShort))") {
-                    LedgerHaptics.light()
-                    assignToDateOnly = true
-                }
-                .buttonStyle(WarmActionButtonStyle(isActive: assignToDateOnly))
+                Menu {
+                    Button {
+                        LedgerHaptics.light()
+                        inlineAssignScope = .thisDateOnly
+                    } label: {
+                        if inlineAssignScope == .thisDateOnly {
+                            Label(InlineAssignScope.thisDateOnly.menuLabel(dateShort: wk.displayDateShort, weekdayFull: wk.dayFullName), systemImage: "checkmark")
+                        } else {
+                            Text(InlineAssignScope.thisDateOnly.menuLabel(dateShort: wk.displayDateShort, weekdayFull: wk.dayFullName))
+                        }
+                    }
 
-                Button("Every \(wk.dayFullName)") {
-                    LedgerHaptics.light()
-                    assignToDateOnly = false
+                    Divider()
+
+                    ForEach(RoutineScheduleSpan.allCases) { span in
+                        let option = InlineAssignScope.weeks(span)
+                        Button {
+                            LedgerHaptics.light()
+                            inlineAssignScope = option
+                        } label: {
+                            if inlineAssignScope == option {
+                                Label(option.menuLabel(dateShort: wk.displayDateShort, weekdayFull: wk.dayFullName), systemImage: "checkmark")
+                            } else {
+                                Text(option.menuLabel(dateShort: wk.displayDateShort, weekdayFull: wk.dayFullName))
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(inlineAssignScope.triggerLabel(dateShort: wk.displayDateShort, weekdayShort: wk.dayName))
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                    .uniformSecondaryButtonChrome(fullWidth: false)
                 }
-                .buttonStyle(WarmActionButtonStyle(isActive: !assignToDateOnly))
 
                 Spacer()
 
@@ -461,9 +513,7 @@ struct WorkoutsView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(store.routines) { r in
-                            let isAssigned: Bool = assignToDateOnly
-                                ? wk.routineIds.contains(r.id)
-                                : r.assignedWeekdays.contains(wk.dayOfWeek)
+                            let isAssigned = wk.routineIds.contains(r.id)
                             HStack(spacing: 8) {
                                 if !r.emblem.isEmpty {
                                     RoutineEmblemBadgeView(emblem: r.emblem, fontSize: 15)
@@ -480,9 +530,10 @@ struct WorkoutsView: View {
                                 Spacer()
                                 Button(isAssigned ? "Assigned ✓" : "+ Add") {
                                     if isAssigned {
-                                        store.unassignRoutine(r.id, fromSelectedDateOnly: assignToDateOnly)
+                                        LedgerHaptics.heavy()
+                                        removePromptInfo = store.removalInfo(forRoutineId: r.id, title: r.title)
                                     } else {
-                                        store.assignRoutine(r.id, toSelectedDateOnly: assignToDateOnly)
+                                        store.assignRoutine(r.id, scope: inlineAssignScope)
                                     }
                                 }
                                 .buttonStyle(WarmActionButtonStyle(isActive: isAssigned))

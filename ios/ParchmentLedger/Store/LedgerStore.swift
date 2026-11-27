@@ -634,12 +634,21 @@ final class LedgerStore: ObservableObject {
         showToast("Custom exercise deleted")
     }
 
-    func createRoutine(title: String, emblem: String = "", exerciseIds: [String], weekdays: [Int], assignSelectedDate: Bool) {
+    func createRoutine(
+        title: String,
+        emblem: String = "",
+        exerciseIds: [String],
+        weekdays: [Int],
+        scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue,
+        assignSelectedDate: Bool
+    ) {
         _ = db.createRoutine(
             title: title,
             emblem: emblem,
             exerciseIds: exerciseIds,
             assignWeekdays: weekdays,
+            scheduleWeeks: scheduleWeeks,
+            startDate: selectedDate,
             assignDate: assignSelectedDate ? selectedDate : nil
         )
         reloadWorkoutState()
@@ -652,6 +661,7 @@ final class LedgerStore: ObservableObject {
         prompt: String,
         emblem: String = "",
         weekdays: [Int],
+        scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue,
         assignSelectedDate: Bool,
         includeCustomExercises: Bool = true
     ) async -> GeneratedRoutinePlan? {
@@ -675,6 +685,8 @@ final class LedgerStore: ObservableObject {
                 emblem: emblem,
                 exerciseIds: plan.exercises.map(\.id),
                 assignWeekdays: weekdays,
+                scheduleWeeks: scheduleWeeks,
+                startDate: selectedDate,
                 assignDate: assignSelectedDate ? selectedDate : nil
             )
             reloadWorkoutState()
@@ -690,8 +702,25 @@ final class LedgerStore: ObservableObject {
         }
     }
 
-    func updateRoutine(id: String, title: String, emblem: String = "", exerciseIds: [String], weekdays: [Int]) {
-        db.updateRoutine(id: id, title: title, emblem: emblem, exerciseIds: exerciseIds, assignWeekdays: weekdays)
+    func updateRoutine(
+        id: String,
+        title: String,
+        emblem: String = "",
+        exerciseIds: [String],
+        weekdays: [Int],
+        scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue,
+        rescheduleFuture: Bool = true
+    ) {
+        db.updateRoutine(
+            id: id,
+            title: title,
+            emblem: emblem,
+            exerciseIds: exerciseIds,
+            assignWeekdays: weekdays,
+            scheduleWeeks: scheduleWeeks,
+            startDate: selectedDate,
+            rescheduleFuture: rescheduleFuture
+        )
         reloadWorkoutState()
         LedgerHaptics.medium()
         triggerInkWrite()
@@ -729,33 +758,61 @@ final class LedgerStore: ObservableObject {
         showToast("All routines deleted")
     }
 
-    func toggleRoutineWeekday(routineId: String, dayOfWeek: Int) {
+    func toggleRoutineWeekday(routineId: String, dayOfWeek: Int, scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue) {
         LedgerHaptics.medium()
-        let clearDate = (dayOfWeek == selectedDow) ? selectedDate : nil
-        db.toggleRoutineWeekday(routineId: routineId, dayOfWeek: dayOfWeek, clearOverrideForDate: clearDate)
+        db.toggleRoutineWeekday(
+            routineId: routineId,
+            dayOfWeek: dayOfWeek,
+            scheduleWeeks: scheduleWeeks,
+            fromDate: selectedDate
+        )
         reloadWorkoutState()
     }
 
-    func assignRoutine(_ routineId: String, toSelectedDateOnly: Bool) {
+    func updateRoutineScheduleWeeks(routineId: String, scheduleWeeks: Int) {
         LedgerHaptics.medium()
-        if toSelectedDateOnly {
+        db.updateRoutineScheduleWeeks(routineId: routineId, scheduleWeeks: scheduleWeeks, startDate: selectedDate)
+        reloadWorkoutState()
+        let span = RoutineScheduleSpan.fromWeeks(scheduleWeeks)
+        showToast("Schedule set to \(span.label)")
+    }
+
+    func assignRoutine(_ routineId: String, scope: InlineAssignScope) {
+        LedgerHaptics.medium()
+        let message: String
+        switch scope {
+        case .thisDateOnly:
             db.assignRoutineToDate(routineId: routineId, sessionDate: selectedDate)
-        } else {
-            db.assignRoutineToWeekday(routineId: routineId, dayOfWeek: selectedDow, clearOverrideForDate: selectedDate)
+            message = "Added to \(DatabaseManager.shortDateLabel(selectedDate))"
+        case .weeks(let span):
+            db.assignRoutineForWeeks(routineId: routineId, weeks: span.rawValue, startingFrom: selectedDate)
+            message = "Scheduled for \(span.label)"
         }
         expandedExerciseIds.removeAll()
         reloadWorkoutState()
         triggerInkWrite()
-        showToast(toSelectedDateOnly ? "Added to \(DatabaseManager.shortDateLabel(selectedDate))" : "Added to weekly schedule")
+        showToast(message)
     }
 
-    func unassignRoutine(_ routineId: String, fromSelectedDateOnly: Bool) {
+    func assignRoutine(_ routineId: String, toSelectedDateOnly: Bool) {
+        assignRoutine(routineId, scope: toSelectedDateOnly ? .thisDateOnly : .weeks(.defaultSpan))
+    }
+
+    func removalInfo(forRoutineId routineId: String, title: String) -> RoutineRemovalInfo {
+        let info = db.remainingScheduleInfo(routineId: routineId, fromDate: selectedDate)
+        return RoutineRemovalInfo(
+            routineId: routineId,
+            title: title,
+            sessionDate: selectedDate,
+            displayDateShort: DatabaseManager.shortDateLabel(selectedDate),
+            remainingCount: info.count,
+            hasRecurringWeekly: info.hasRecurringWeekly
+        )
+    }
+
+    func unassignRoutineAndRemaining(_ routineId: String) {
         LedgerHaptics.heavy()
-        if fromSelectedDateOnly {
-            db.removeRoutineFromDate(routineId: routineId, sessionDate: selectedDate)
-        } else {
-            db.removeRoutineFromWeekday(routineId: routineId, dayOfWeek: selectedDow, clearOverrideForDate: selectedDate)
-        }
+        let removed = db.removeRoutineFromDateAndRemaining(routineId: routineId, fromDate: selectedDate)
         if editingRoutineId == routineId {
             editingRoutineId = nil
             editRoutineMode = false
@@ -767,14 +824,35 @@ final class LedgerStore: ObservableObject {
         openVideoIds.removeAll()
         reloadWorkoutState()
         triggerInkWrite()
-        showToast(fromSelectedDateOnly ? "Removed from \(DatabaseManager.shortDateLabel(selectedDate))" : "Removed from weekly schedule")
+        showToast(removed > 1 ? "Removed \(removed) remaining entries" : "Removed from remaining schedule")
+    }
+
+    func unassignRoutine(_ routineId: String, fromSelectedDateOnly: Bool) {
+        if fromSelectedDateOnly {
+            LedgerHaptics.heavy()
+            db.removeRoutineFromDate(routineId: routineId, sessionDate: selectedDate)
+            if editingRoutineId == routineId {
+                editingRoutineId = nil
+                editRoutineMode = false
+            }
+            if pickerTargetRoutineId == routineId {
+                closeExercisePicker()
+            }
+            expandedExerciseIds.removeAll()
+            openVideoIds.removeAll()
+            reloadWorkoutState()
+            triggerInkWrite()
+            showToast("Removed from \(DatabaseManager.shortDateLabel(selectedDate))")
+        } else {
+            unassignRoutineAndRemaining(routineId)
+        }
     }
 
     func toggleRoutineOnSelectedDate(_ routineId: String) {
         if workout?.routineIds.contains(routineId) == true {
             unassignRoutine(routineId, fromSelectedDateOnly: true)
         } else {
-            assignRoutine(routineId, toSelectedDateOnly: true)
+            assignRoutine(routineId, scope: .thisDateOnly)
         }
     }
 
@@ -805,7 +883,7 @@ final class LedgerStore: ObservableObject {
     }
 
     private func reloadWorkoutState() {
-        routines = db.listRoutines()
+        routines = db.listRoutines(referenceDate: selectedDate)
         customExercises = db.listCustomExercises()
         weekSlots = db.getWeekDaySlots(containing: selectedDate, todayDate: todayDate)
         monthSlots = db.getMonthDaySlots(forMonthAnchor: displayedMonthAnchor, todayDate: todayDate)

@@ -16,6 +16,7 @@ struct CycleView: View {
     @State private var bbtDraft: String = ""
     @State private var notesDraft: String = ""
     @State private var showMedicalSources: Bool = false
+    @State private var cycleMonthSlideDirection: Int = 1
     @State private var pendingConfirm: PendingActionConfirmation? = nil
 
     private let symptomOptions = [
@@ -149,70 +150,94 @@ struct CycleView: View {
         let slots = DatabaseManager.cycleMonthSlots(anchor: store.cycleMonthAnchor, todayDate: store.todayDate)
         let cols = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
         let headers = ["M", "T", "W", "T", "F", "S", "S"]
+        let monthKey = DatabaseManager.monthAnchorKey(store.cycleMonthAnchor)
 
         return VStack(alignment: .leading, spacing: 10) {
             CenteredCalendarHeaderView(
                 title: DatabaseManager.monthTitle(store.cycleMonthAnchor),
-                onPrevious: { store.shiftCycleMonth(by: -1) },
-                onNext: { store.shiftCycleMonth(by: 1) }
+                onPrevious: {
+                    cycleMonthSlideDirection = -1
+                    withAnimation(.easeInOut(duration: 0.24)) {
+                        store.shiftCycleMonth(by: -1)
+                    }
+                },
+                onNext: {
+                    cycleMonthSlideDirection = 1
+                    withAnimation(.easeInOut(duration: 0.24)) {
+                        store.shiftCycleMonth(by: 1)
+                    }
+                }
             )
 
-            LazyVGrid(columns: cols, spacing: 6) {
+            HStack(spacing: 4) {
                 ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
                     Text(h)
                         .font(LedgerFont.sansSm())
                         .foregroundStyle(LedgerColor.inkSecondary)
                         .frame(maxWidth: .infinity)
                 }
+            }
 
-                ForEach(slots) { slot in
-                    if let iso = slot.isoDate, let day = slot.dayNumber {
-                        let log = store.cycleLog(forDate: iso)
-                        let hasFlow = log.map { $0.flow != CycleFlowLevel.none } ?? false
-                        let phase = store.cycleSummary.dayPhases[iso] ?? .none
-                        let isPredicted = phase == .predictedPeriod
-                        let isSelected = iso == store.cycleSelectedDate
+            ZStack(alignment: .top) {
+                LazyVGrid(columns: cols, spacing: 6) {
+                    ForEach(slots) { slot in
+                        if let iso = slot.isoDate, let day = slot.dayNumber {
+                            let log = store.cycleLog(forDate: iso)
+                            let hasFlow = log.map { $0.flow != CycleFlowLevel.none } ?? false
+                            let phase = store.cycleSummary.dayPhases[iso] ?? .none
+                            let isPredicted = phase == .predictedPeriod
+                            let isSelected = iso == store.cycleSelectedDate
 
-                        Button {
-                            store.selectCycleDate(iso)
-                        } label: {
-                            VStack(spacing: 2) {
-                                Text("\(day)")
-                                    .font(LedgerFont.sansSm(semibold: isSelected || slot.isToday || hasFlow))
-                                    .monospacedDigit()
-                                    .foregroundStyle(LedgerColor.inkPrimary)
+                            Button {
+                                store.selectCycleDate(iso)
+                            } label: {
+                                VStack(spacing: 2) {
+                                    Text("\(day)")
+                                        .font(LedgerFont.sansSm(semibold: isSelected || slot.isToday || hasFlow))
+                                        .monospacedDigit()
+                                        .foregroundStyle(LedgerColor.inkPrimary)
 
-                                Circle()
-                                    .fill(dotColor(log: log, isToday: slot.isToday, phase: phase))
-                                    .frame(width: 4, height: 4)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 34)
-                            .background(phaseFillColor(phase: phase, isSelected: isSelected))
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .overlay(
-                                Group {
-                                    if isSelected {
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .strokeBorder(LedgerColor.inkPrimary, lineWidth: 1.6)
-                                    } else if isPredicted {
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .strokeBorder(
-                                                LedgerColor.cycleRose.opacity(0.75),
-                                                style: StrokeStyle(lineWidth: 1.0, dash: [3, 2])
-                                            )
-                                    } else if slot.isToday {
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .strokeBorder(LedgerColor.warmTerracotta, lineWidth: 1.1)
-                                    }
+                                    Circle()
+                                        .fill(dotColor(log: log, isToday: slot.isToday, phase: phase))
+                                        .frame(width: 4, height: 4)
                                 }
-                            )
+                                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
+                                .background(phaseFillColor(phase: phase, isSelected: isSelected))
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .overlay(
+                                    Group {
+                                        if isSelected {
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(LedgerColor.inkPrimary, lineWidth: 1.6)
+                                        } else if isPredicted {
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(
+                                                    LedgerColor.cycleRose.opacity(0.75),
+                                                    style: StrokeStyle(lineWidth: 1.0, dash: [3, 2])
+                                                )
+                                        } else if slot.isToday {
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(LedgerColor.warmTerracotta, lineWidth: 1.1)
+                                        }
+                                    }
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Color.clear.frame(height: 36)
                         }
-                        .buttonStyle(.plain)
-                    } else {
-                        Color.clear.frame(height: 34)
                     }
                 }
+                .id(monthKey)
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: cycleMonthSlideDirection >= 0 ? .trailing : .leading).combined(with: .opacity),
+                        removal: .move(edge: cycleMonthSlideDirection >= 0 ? .leading : .trailing).combined(with: .opacity)
+                    )
+                )
             }
+            .frame(height: 246, alignment: .top)
+            .clipped()
 
             // Multi-row wrapping legend ensures all 5 phase swatches remain visible on narrow screens.
             LazyVGrid(

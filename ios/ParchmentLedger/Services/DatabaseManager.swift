@@ -128,6 +128,7 @@ final class DatabaseManager: @unchecked Sendable {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             emblem TEXT NOT NULL DEFAULT '',
+            schedule_weeks INTEGER NOT NULL DEFAULT 4,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -340,6 +341,9 @@ final class DatabaseManager: @unchecked Sendable {
         let routineCols = tableColumns("routines")
         if !routineCols.contains("emblem") {
             exec("ALTER TABLE routines ADD COLUMN emblem TEXT NOT NULL DEFAULT '';")
+        }
+        if !routineCols.contains("schedule_weeks") {
+            exec("ALTER TABLE routines ADD COLUMN schedule_weeks INTEGER NOT NULL DEFAULT 4;")
         }
 
         let weeklyCols = tableColumns("weekly_schedule")
@@ -607,20 +611,22 @@ final class DatabaseManager: @unchecked Sendable {
 
     // MARK: - Public Workouts & Routines API
 
-    private func insertRoutineRowInternal(id: String, title: String, emblem: String = "", createdAt: String, updatedAt: String) {
+    private func insertRoutineRowInternal(id: String, title: String, emblem: String = "", scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue, createdAt: String, updatedAt: String) {
         guard let db = db else { return }
         let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
+        let clampedWeeks = max(1, min(52, scheduleWeeks))
         var stmt: OpaquePointer?
         let sql = """
-        INSERT INTO routines (id, title, emblem, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET title = excluded.title, emblem = excluded.emblem, updated_at = excluded.updated_at
+        INSERT INTO routines (id, title, emblem, schedule_weeks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET title = excluded.title, emblem = excluded.emblem, schedule_weeks = excluded.schedule_weeks, updated_at = excluded.updated_at
         """
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 2, title, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 3, cleanEmblem, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 4, createdAt, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 5, updatedAt, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 4, Int32(clampedWeeks))
+            sqlite3_bind_text(stmt, 5, createdAt, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 6, updatedAt, -1, SQLITE_TRANSIENT)
             sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)
@@ -731,7 +737,7 @@ final class DatabaseManager: @unchecked Sendable {
             let leadingBlanks = Self.weekdayIndex(firstOfMonth)
             var out: [MonthDaySlot] = []
             for i in 0..<leadingBlanks {
-                out.append(MonthDaySlot(id: "blank_\(i)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false, routineMarkers: []))
+                out.append(MonthDaySlot(id: "blank_lead_\(i)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false, routineMarkers: []))
             }
 
             for day in range {
@@ -751,6 +757,12 @@ final class DatabaseManager: @unchecked Sendable {
                         routineMarkers: markers
                     )
                 )
+            }
+
+            var trailIndex = 0
+            while out.count < 42 {
+                out.append(MonthDaySlot(id: "blank_trail_\(trailIndex)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false, routineMarkers: []))
+                trailIndex += 1
             }
             return out
         }
@@ -1043,22 +1055,23 @@ final class DatabaseManager: @unchecked Sendable {
         )
     }
 
-    func listRoutines() -> [RoutineSummary] {
+    func listRoutines(referenceDate: String = DatabaseManager.isoDate()) -> [RoutineSummary] {
         queue.sync {
             guard let db = db else { return [] }
-            var rows: [(String, String, String)] = []
+            var rows: [(String, String, String, Int)] = []
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT id, title, COALESCE(emblem, '') FROM routines ORDER BY created_at DESC, title ASC", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT id, title, COALESCE(emblem, ''), COALESCE(schedule_weeks, 4) FROM routines ORDER BY created_at DESC, title ASC", -1, &stmt, nil) == SQLITE_OK {
                 while sqlite3_step(stmt) == SQLITE_ROW {
                     let id = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
                     let title = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
                     let emblem = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
-                    if !id.isEmpty { rows.append((id, title, emblem)) }
+                    let weeks = max(1, min(52, Int(sqlite3_column_int(stmt, 3))))
+                    if !id.isEmpty { rows.append((id, title, emblem, weeks)) }
                 }
             }
             sqlite3_finalize(stmt)
 
-            return rows.map { (rid, title, emblem) in
+            return rows.map { (rid, title, emblem, scheduleWeeks) in
                 var exercises: [Exercise] = []
                 var exStmt: OpaquePointer?
                 let exSql = """
@@ -1085,37 +1098,81 @@ final class DatabaseManager: @unchecked Sendable {
                 }
                 sqlite3_finalize(exStmt)
 
-                var days: [Int] = []
+                var legacyDays = Set<Int>()
                 var wsStmt: OpaquePointer?
                 if sqlite3_prepare_v2(db, "SELECT day_of_week FROM weekly_schedule WHERE routine_id = ? ORDER BY day_of_week ASC", -1, &wsStmt, nil) == SQLITE_OK {
                     sqlite3_bind_text(wsStmt, 1, rid, -1, SQLITE_TRANSIENT)
                     while sqlite3_step(wsStmt) == SQLITE_ROW {
-                        days.append(Int(sqlite3_column_int(wsStmt, 0)))
+                        legacyDays.insert(Int(sqlite3_column_int(wsStmt, 0)))
                     }
                 }
                 sqlite3_finalize(wsStmt)
 
-                return RoutineSummary(id: rid, title: title, emblem: emblem, exercises: exercises, assignedWeekdays: days)
+                var upcomingDates: [String] = []
+                var dsStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "SELECT DISTINCT session_date FROM date_schedule WHERE routine_id = ? AND session_date >= ? ORDER BY session_date ASC", -1, &dsStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(dsStmt, 1, rid, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(dsStmt, 2, referenceDate, -1, SQLITE_TRANSIENT)
+                    while sqlite3_step(dsStmt) == SQLITE_ROW {
+                        if let ptr = sqlite3_column_text(dsStmt, 0) {
+                            let s = String(cString: ptr)
+                            if !s.isEmpty { upcomingDates.append(s) }
+                        }
+                    }
+                }
+                sqlite3_finalize(dsStmt)
+
+                let upcomingWeekdays = Set(upcomingDates.map { Self.weekdayIndex(Self.dateFromISO($0)) })
+                let combinedDays = Array(upcomingWeekdays.union(legacyDays)).sorted()
+
+                return RoutineSummary(
+                    id: rid,
+                    title: title,
+                    emblem: emblem,
+                    exercises: exercises,
+                    assignedWeekdays: combinedDays,
+                    scheduleWeeks: scheduleWeeks,
+                    upcomingDateCount: upcomingDates.count,
+                    scheduledThroughDate: upcomingDates.last,
+                    hasLegacyWeekly: !legacyDays.isEmpty
+                )
             }
         }
     }
 
     @discardableResult
-    func createRoutine(title: String, emblem: String = "", exerciseIds: [String], assignWeekdays: [Int], assignDate: String?) -> String {
+    func createRoutine(
+        title: String,
+        emblem: String = "",
+        exerciseIds: [String],
+        assignWeekdays: [Int],
+        scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue,
+        startDate: String? = nil,
+        assignDate: String?
+    ) -> String {
         queue.sync {
             let rid = "rt_\(UUID().uuidString.prefix(8).lowercased())"
             let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalTitle = cleanTitle.isEmpty ? "Custom Routine" : cleanTitle
             let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
+            let clampedWeeks = max(1, min(52, scheduleWeeks))
             let stamp = Self.nowISO()
+            let anchor = (startDate?.isEmpty == false ? startDate! : nil)
+                ?? (assignDate?.isEmpty == false ? assignDate! : Self.isoDate())
+            let scheduledDates = Self.scheduledDates(
+                forWeekdays: assignWeekdays,
+                weeks: clampedWeeks,
+                startingFrom: anchor,
+                includeStartDate: false
+            )
 
             exec("BEGIN IMMEDIATE;")
-            insertRoutineRowInternal(id: rid, title: finalTitle, emblem: cleanEmblem, createdAt: stamp, updatedAt: stamp)
+            insertRoutineRowInternal(id: rid, title: finalTitle, emblem: cleanEmblem, scheduleWeeks: clampedWeeks, createdAt: stamp, updatedAt: stamp)
             for (idx, exId) in exerciseIds.enumerated() {
                 insertRoutineItemInternal(routineId: rid, exerciseId: exId, sortOrder: idx)
             }
-            for dow in Set(assignWeekdays) where (0...6).contains(dow) {
-                assignWeekdayInternal(routineId: rid, dayOfWeek: dow, syncOverrideForDate: nil)
+            for dateStr in scheduledDates {
+                addRoutineToDateInternal(routineId: rid, sessionDate: dateStr)
             }
             if let dateStr = assignDate, !dateStr.isEmpty {
                 addRoutineToDateInternal(routineId: rid, sessionDate: dateStr)
@@ -1125,22 +1182,33 @@ final class DatabaseManager: @unchecked Sendable {
         }
     }
 
-    func updateRoutine(id: String, title: String, emblem: String = "", exerciseIds: [String], assignWeekdays: [Int]) {
+    func updateRoutine(
+        id: String,
+        title: String,
+        emblem: String = "",
+        exerciseIds: [String],
+        assignWeekdays: [Int],
+        scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue,
+        startDate: String = DatabaseManager.isoDate(),
+        rescheduleFuture: Bool = true
+    ) {
         queue.sync {
             guard let db = db else { return }
             let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalTitle = cleanTitle.isEmpty ? "Custom Routine" : cleanTitle
             let cleanEmblem = RoutineEmblemCatalog.sanitize(emblem)
+            let clampedWeeks = max(1, min(52, scheduleWeeks))
             let stamp = Self.nowISO()
-            let targetDays = Set(assignWeekdays.filter { (0...6).contains($0) })
+            let anchor = startDate.isEmpty ? Self.isoDate() : startDate
 
             exec("BEGIN IMMEDIATE;")
             var updStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "UPDATE routines SET title = ?, emblem = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "UPDATE routines SET title = ?, emblem = ?, schedule_weeks = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(updStmt, 1, finalTitle, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(updStmt, 2, cleanEmblem, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(updStmt, 3, stamp, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(updStmt, 4, id, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(updStmt, 3, Int32(clampedWeeks))
+                sqlite3_bind_text(updStmt, 4, stamp, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updStmt, 5, id, -1, SQLITE_TRANSIENT)
                 sqlite3_step(updStmt)
             }
             sqlite3_finalize(updStmt)
@@ -1156,28 +1224,93 @@ final class DatabaseManager: @unchecked Sendable {
                 insertRoutineItemInternal(routineId: id, exerciseId: exId, sortOrder: idx)
             }
 
-            var existingDays: [Int] = []
-            var curStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT day_of_week FROM weekly_schedule WHERE routine_id = ?", -1, &curStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(curStmt, 1, id, -1, SQLITE_TRANSIENT)
-                while sqlite3_step(curStmt) == SQLITE_ROW {
-                    existingDays.append(Int(sqlite3_column_int(curStmt, 0)))
+            if rescheduleFuture {
+                var delFutureStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE routine_id = ? AND session_date >= ?", -1, &delFutureStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(delFutureStmt, 1, id, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(delFutureStmt, 2, anchor, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(delFutureStmt)
+                }
+                sqlite3_finalize(delFutureStmt)
+
+                var delWeeklyStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE routine_id = ?", -1, &delWeeklyStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(delWeeklyStmt, 1, id, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(delWeeklyStmt)
+                }
+                sqlite3_finalize(delWeeklyStmt)
+
+                let dates = Self.scheduledDates(forWeekdays: assignWeekdays, weeks: clampedWeeks, startingFrom: anchor)
+                for dateStr in dates {
+                    addRoutineToDateInternal(routineId: id, sessionDate: dateStr)
                 }
             }
-            sqlite3_finalize(curStmt)
+            exec("COMMIT;")
+        }
+    }
 
-            for dow in existingDays where !targetDays.contains(dow) {
-                var rmStmt: OpaquePointer?
-                if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE day_of_week = ? AND routine_id = ?", -1, &rmStmt, nil) == SQLITE_OK {
-                    sqlite3_bind_int(rmStmt, 1, Int32(dow))
-                    sqlite3_bind_text(rmStmt, 2, id, -1, SQLITE_TRANSIENT)
-                    sqlite3_step(rmStmt)
-                }
-                sqlite3_finalize(rmStmt)
+    func updateRoutineScheduleWeeks(routineId: String, scheduleWeeks: Int, startDate: String = DatabaseManager.isoDate()) {
+        queue.sync {
+            guard let db = db else { return }
+            let clampedWeeks = max(1, min(52, scheduleWeeks))
+            let anchor = startDate.isEmpty ? Self.isoDate() : startDate
+            let stamp = Self.nowISO()
+
+            exec("BEGIN IMMEDIATE;")
+            var updStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE routines SET schedule_weeks = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
+                sqlite3_bind_int(updStmt, 1, Int32(clampedWeeks))
+                sqlite3_bind_text(updStmt, 2, stamp, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updStmt, 3, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_step(updStmt)
             }
+            sqlite3_finalize(updStmt)
 
-            for dow in targetDays {
-                assignWeekdayInternal(routineId: id, dayOfWeek: dow, syncOverrideForDate: nil)
+            var activeWeekdays = Set<Int>()
+            var dsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT DISTINCT session_date FROM date_schedule WHERE routine_id = ? AND session_date >= ?", -1, &dsStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(dsStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(dsStmt, 2, anchor, -1, SQLITE_TRANSIENT)
+                while sqlite3_step(dsStmt) == SQLITE_ROW {
+                    if let ptr = sqlite3_column_text(dsStmt, 0) {
+                        let iso = String(cString: ptr)
+                        if !iso.isEmpty {
+                            activeWeekdays.insert(Self.weekdayIndex(Self.dateFromISO(iso)))
+                        }
+                    }
+                }
+            }
+            sqlite3_finalize(dsStmt)
+
+            var wsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT day_of_week FROM weekly_schedule WHERE routine_id = ?", -1, &wsStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(wsStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                while sqlite3_step(wsStmt) == SQLITE_ROW {
+                    activeWeekdays.insert(Int(sqlite3_column_int(wsStmt, 0)))
+                }
+            }
+            sqlite3_finalize(wsStmt)
+
+            if !activeWeekdays.isEmpty {
+                var delFutureStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE routine_id = ? AND session_date >= ?", -1, &delFutureStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(delFutureStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(delFutureStmt, 2, anchor, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(delFutureStmt)
+                }
+                sqlite3_finalize(delFutureStmt)
+
+                var delWeeklyStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE routine_id = ?", -1, &delWeeklyStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(delWeeklyStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(delWeeklyStmt)
+                }
+                sqlite3_finalize(delWeeklyStmt)
+
+                let dates = Self.scheduledDates(forWeekdays: Array(activeWeekdays), weeks: clampedWeeks, startingFrom: anchor)
+                for dateStr in dates {
+                    addRoutineToDateInternal(routineId: routineId, sessionDate: dateStr)
+                }
             }
             exec("COMMIT;")
         }
@@ -1259,19 +1392,91 @@ final class DatabaseManager: @unchecked Sendable {
         }
     }
 
-    func toggleRoutineWeekday(routineId: String, dayOfWeek: Int, clearOverrideForDate: String? = nil) {
+    func toggleRoutineWeekday(routineId: String, dayOfWeek: Int, scheduleWeeks: Int = RoutineScheduleSpan.defaultSpan.rawValue, fromDate startDate: String = DatabaseManager.isoDate()) {
         queue.sync {
-            guard (0...6).contains(dayOfWeek) else { return }
-            let exists = scalarInt(
+            guard let db = db, (0...6).contains(dayOfWeek) else { return }
+            let anchor = startDate.isEmpty ? Self.isoDate() : startDate
+            let clampedWeeks = max(1, min(52, scheduleWeeks))
+
+            let hasWeekly = scalarInt(
                 "SELECT COUNT(*) FROM weekly_schedule WHERE day_of_week = ? AND routine_id = ?",
                 args: ["\(dayOfWeek)", routineId]
             ) > 0
 
-            if exists {
-                removeRoutineFromWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, syncOverrideForDate: clearOverrideForDate)
-            } else {
-                assignWeekdayInternal(routineId: routineId, dayOfWeek: dayOfWeek, syncOverrideForDate: clearOverrideForDate)
+            var matchingDates: [String] = []
+            var dsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT DISTINCT session_date FROM date_schedule WHERE routine_id = ? AND session_date >= ?", -1, &dsStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(dsStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(dsStmt, 2, anchor, -1, SQLITE_TRANSIENT)
+                while sqlite3_step(dsStmt) == SQLITE_ROW {
+                    if let ptr = sqlite3_column_text(dsStmt, 0) {
+                        let iso = String(cString: ptr)
+                        if !iso.isEmpty && Self.weekdayIndex(Self.dateFromISO(iso)) == dayOfWeek {
+                            matchingDates.append(iso)
+                        }
+                    }
+                }
             }
+            sqlite3_finalize(dsStmt)
+
+            exec("BEGIN IMMEDIATE;")
+            if hasWeekly || !matchingDates.isEmpty {
+                var delWStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE day_of_week = ? AND routine_id = ?", -1, &delWStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_int(delWStmt, 1, Int32(dayOfWeek))
+                    sqlite3_bind_text(delWStmt, 2, routineId, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(delWStmt)
+                }
+                sqlite3_finalize(delWStmt)
+
+                for iso in matchingDates {
+                    var delDStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ? AND routine_id = ?", -1, &delDStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_text(delDStmt, 1, iso, -1, SQLITE_TRANSIENT)
+                        sqlite3_bind_text(delDStmt, 2, routineId, -1, SQLITE_TRANSIENT)
+                        sqlite3_step(delDStmt)
+                    }
+                    sqlite3_finalize(delDStmt)
+                }
+            } else {
+                let dates = Self.scheduledDates(forWeekdays: [dayOfWeek], weeks: clampedWeeks, startingFrom: anchor)
+                for iso in dates {
+                    addRoutineToDateInternal(routineId: routineId, sessionDate: iso)
+                }
+                var updStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, "UPDATE routines SET schedule_weeks = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_int(updStmt, 1, Int32(clampedWeeks))
+                    sqlite3_bind_text(updStmt, 2, Self.nowISO(), -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(updStmt, 3, routineId, -1, SQLITE_TRANSIENT)
+                    sqlite3_step(updStmt)
+                }
+                sqlite3_finalize(updStmt)
+            }
+            exec("COMMIT;")
+        }
+    }
+
+    func assignRoutineForWeeks(routineId: String, weeks: Int, startingFrom startDate: String) {
+        queue.sync {
+            guard let db = db, !routineId.isEmpty else { return }
+            let anchor = startDate.isEmpty ? Self.isoDate() : startDate
+            let clampedWeeks = max(1, min(52, weeks))
+            let dow = Self.weekdayIndex(Self.dateFromISO(anchor))
+            let dates = Self.scheduledDates(forWeekdays: [dow], weeks: clampedWeeks, startingFrom: anchor)
+
+            exec("BEGIN IMMEDIATE;")
+            for iso in dates {
+                addRoutineToDateInternal(routineId: routineId, sessionDate: iso)
+            }
+            var updStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE routines SET schedule_weeks = ?, updated_at = ? WHERE id = ?", -1, &updStmt, nil) == SQLITE_OK {
+                sqlite3_bind_int(updStmt, 1, Int32(clampedWeeks))
+                sqlite3_bind_text(updStmt, 2, Self.nowISO(), -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updStmt, 3, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_step(updStmt)
+            }
+            sqlite3_finalize(updStmt)
+            exec("COMMIT;")
         }
     }
 
@@ -1405,6 +1610,22 @@ final class DatabaseManager: @unchecked Sendable {
         }
     }
 
+    func remainingScheduleInfo(routineId: String, fromDate sessionDate: String) -> (count: Int, hasRecurringWeekly: Bool) {
+        queue.sync {
+            let anchor = sessionDate.isEmpty ? Self.isoDate() : sessionDate
+            let dateCount = scalarInt(
+                "SELECT COUNT(DISTINCT session_date) FROM date_schedule WHERE routine_id = ? AND session_date >= ?",
+                args: [routineId, anchor]
+            )
+            let hasWeekly = scalarInt(
+                "SELECT COUNT(*) FROM weekly_schedule WHERE routine_id = ?",
+                args: [routineId]
+            ) > 0
+            let effectiveCount = (hasWeekly && dateCount == 0) ? 1 : dateCount
+            return (effectiveCount, hasWeekly)
+        }
+    }
+
     func removeRoutineFromDate(routineId: String, sessionDate: String) {
         queue.sync {
             guard let db = db else { return }
@@ -1419,13 +1640,72 @@ final class DatabaseManager: @unchecked Sendable {
 
             let remaining = scalarInt("SELECT COUNT(*) FROM date_schedule WHERE session_date = ? AND routine_id != ''", args: [sessionDate])
             if remaining == 0 {
-                var clStmt: OpaquePointer?
-                if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, '', 0)", -1, &clStmt, nil) == SQLITE_OK {
-                    sqlite3_bind_text(clStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
-                    sqlite3_step(clStmt)
+                let dow = Self.weekdayIndex(Self.dateFromISO(sessionDate))
+                let weeklyCountForDow = scalarInt("SELECT COUNT(*) FROM weekly_schedule WHERE day_of_week = ?", args: ["\(dow)"])
+                if weeklyCountForDow > 0 {
+                    var clStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO date_schedule (session_date, routine_id, sort_order) VALUES (?, '', 0)", -1, &clStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_text(clStmt, 1, sessionDate, -1, SQLITE_TRANSIENT)
+                        sqlite3_step(clStmt)
+                    }
+                    sqlite3_finalize(clStmt)
                 }
-                sqlite3_finalize(clStmt)
             }
+        }
+    }
+
+    @discardableResult
+    func removeRoutineFromDateAndRemaining(routineId: String, fromDate sessionDate: String) -> Int {
+        queue.sync {
+            guard let db = db, !routineId.isEmpty else { return 0 }
+            let anchor = sessionDate.isEmpty ? Self.isoDate() : sessionDate
+            let removedCount = scalarInt(
+                "SELECT COUNT(DISTINCT session_date) FROM date_schedule WHERE routine_id = ? AND session_date >= ?",
+                args: [routineId, anchor]
+            )
+
+            exec("BEGIN IMMEDIATE;")
+            var delDateStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE routine_id = ? AND session_date >= ?", -1, &delDateStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(delDateStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(delDateStmt, 2, anchor, -1, SQLITE_TRANSIENT)
+                sqlite3_step(delDateStmt)
+            }
+            sqlite3_finalize(delDateStmt)
+
+            var delWeeklyStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM weekly_schedule WHERE routine_id = ?", -1, &delWeeklyStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(delWeeklyStmt, 1, routineId, -1, SQLITE_TRANSIENT)
+                sqlite3_step(delWeeklyStmt)
+            }
+            sqlite3_finalize(delWeeklyStmt)
+
+            var sentinelDates: [String] = []
+            var sentStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT session_date FROM date_schedule WHERE routine_id = '' AND session_date >= ?", -1, &sentStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(sentStmt, 1, anchor, -1, SQLITE_TRANSIENT)
+                while sqlite3_step(sentStmt) == SQLITE_ROW {
+                    if let ptr = sqlite3_column_text(sentStmt, 0) {
+                        sentinelDates.append(String(cString: ptr))
+                    }
+                }
+            }
+            sqlite3_finalize(sentStmt)
+
+            for sDate in sentinelDates {
+                let dow = Self.weekdayIndex(Self.dateFromISO(sDate))
+                let weeklyCountForDow = scalarInt("SELECT COUNT(*) FROM weekly_schedule WHERE day_of_week = ?", args: ["\(dow)"])
+                if weeklyCountForDow == 0 {
+                    var rmSentStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "DELETE FROM date_schedule WHERE session_date = ? AND routine_id = ''", -1, &rmSentStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_text(rmSentStmt, 1, sDate, -1, SQLITE_TRANSIENT)
+                        sqlite3_step(rmSentStmt)
+                    }
+                    sqlite3_finalize(rmSentStmt)
+                }
+            }
+            exec("COMMIT;")
+            return removedCount
         }
     }
 
@@ -2681,6 +2961,42 @@ final class DatabaseManager: @unchecked Sendable {
         monthTitleFormatter.string(from: date).uppercased()
     }
 
+    static func monthAnchorKey(_ date: Date) -> String {
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents([.year, .month], from: date)
+        let y = comps.year ?? 2026
+        let m = comps.month ?? 1
+        return String(format: "%04d-%02d", y, m)
+    }
+
+    static func scheduledDates(
+        forWeekdays weekdays: [Int],
+        weeks: Int,
+        startingFrom startISO: String,
+        includeStartDate: Bool = false
+    ) -> [String] {
+        let clampedWeeks = max(1, min(52, weeks))
+        let weekdaySet = Set(weekdays.filter { (0...6).contains($0) })
+        var dates = Set<String>()
+
+        if !weekdaySet.isEmpty {
+            let totalDays = clampedWeeks * 7
+            for offset in 0..<totalDays {
+                let iso = shiftISODate(startISO, byDays: offset)
+                let dow = weekdayIndex(dateFromISO(iso))
+                if weekdaySet.contains(dow) {
+                    dates.insert(iso)
+                }
+            }
+        }
+
+        if includeStartDate, !startISO.isEmpty {
+            dates.insert(startISO)
+        }
+
+        return dates.sorted()
+    }
+
     static func shiftMonth(_ date: Date, by delta: Int) -> Date {
         let cal = Calendar(identifier: .gregorian)
         let comps = cal.dateComponents([.year, .month], from: date)
@@ -2699,7 +3015,7 @@ final class DatabaseManager: @unchecked Sendable {
         let leadingBlanks = weekdayIndex(firstOfMonth)
         var out: [MonthDaySlot] = []
         for i in 0..<leadingBlanks {
-            out.append(MonthDaySlot(id: "cblank_\(i)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false))
+            out.append(MonthDaySlot(id: "cblank_lead_\(i)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false))
         }
 
         for day in range {
@@ -2715,6 +3031,12 @@ final class DatabaseManager: @unchecked Sendable {
                     hasLoggedSets: false
                 )
             )
+        }
+
+        var trailIndex = 0
+        while out.count < 42 {
+            out.append(MonthDaySlot(id: "cblank_trail_\(trailIndex)", isoDate: nil, dayNumber: nil, isToday: false, hasRoutine: false, hasLoggedSets: false))
+            trailIndex += 1
         }
         return out
     }
@@ -4055,7 +4377,7 @@ final class DatabaseManager: @unchecked Sendable {
             }
 
             for rt in snapshot.routines {
-                insertRoutineRowInternal(id: rt.id, title: rt.title, emblem: rt.emblem, createdAt: stamp, updatedAt: stamp)
+                insertRoutineRowInternal(id: rt.id, title: rt.title, emblem: rt.emblem, scheduleWeeks: rt.scheduleWeeks, createdAt: stamp, updatedAt: stamp)
                 var delStmt: OpaquePointer?
                 if sqlite3_prepare_v2(db, "DELETE FROM routine_items WHERE routine_id = ?", -1, &delStmt, nil) == SQLITE_OK {
                     sqlite3_bind_text(delStmt, 1, rt.id, -1, SQLITE_TRANSIENT)
